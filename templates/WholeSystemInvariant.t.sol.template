@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+// ===========================================================================================
+// WHOLE-SYSTEM INVARIANT TEST TEMPLATE
+// Deploy the full protocol + multiple entities, register SystemHandler as the fuzz target,
+// and assert the four system properties. ALWAYS prove coverage with the canary before trusting green.
+// ===========================================================================================
+
+import {Test} from "forge-std/Test.sol";
+// import {SystemHandler} from "./SystemHandler.sol";  + protocol/token/deploy helper
+
+contract SystemInvariantTest is Test {
+    // SystemHandler handler; IProtocol protocol; MockToken token;  uint256[] entities;
+    address admin = makeAddr("admin");
+
+    function setUp() public {
+        // deploy token + full protocol (use the project's deploy helper, not hand-wired facets);
+        // register >=2 entities (products/markets); handler = new SystemHandler(protocol, token, admin, entities);
+        // targetContract(address(handler));
+    }
+
+    /// @dev Conservation: value in == paid to users + withdrawn to sink + still held.
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_conservation() public view {
+        // uint256 inSum; uint256 outSum = handler.withdrawnToSink();
+        // for each entity e: inSum += handler.fundedIn(e); outSum += handler.paidOut(e);
+        // assertEq(inSum, outSum + token.balanceOf(address(protocol)), "conservation");
+    }
+
+    /// @dev SOLVENCY: the proxy always holds at least the sum of all escrowed obligations.
+    ///      The key whole-system property — every owed party is backed at every reachable state.
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_solvency() public view {
+        // uint256 owed; for each entity e: owed += handler.totalEscrow(e);
+        // assertGe(token.balanceOf(address(protocol)), owed, "INSOLVENT: escrow exceeds backing");
+    }
+
+    /// @dev Per-entity no-overpay: no entity pays out more than its own funding + yield + tolerance.
+    ///      A cross-entity drain trips the victim's or attacker's bound. Compute caps from the protocol's libs.
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_perEntityNoOverpay() public view {
+        // for each entity e: assertLe(handler.paidOut(e), funding(e) + yield(e) + tolerance(e), "OVERPAY");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // COVERAGE CANARY — run, watch it FAIL, then delete. A green invariant that never reached
+    // redeem/claim across multiple entities proves nothing.
+    //   function afterInvariant() public view {
+    //     require(!(handler.covRedeem()>0 && handler.covClaim()>0 && handler.withdrawnToSink()>0),
+    //       "CANARY: multi-entity redeem+claim+withdraw reached");
+    //   }
+    //   Run: FOUNDRY_INVARIANT_RUNS=10 FOUNDRY_INVARIANT_DEPTH=1500 forge test --mt invariant_solvency
+    // ---------------------------------------------------------------------------------------
+}

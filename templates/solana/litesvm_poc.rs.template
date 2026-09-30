@@ -1,0 +1,158 @@
+// ===========================================================================================
+// SOLANA EXPLOIT-PoC HARNESS — LiteSVM (Rust)   [the direct analog of a focused Foundry test]
+// ---
+// WHY THIS EXISTS
+//   On Solana the static/symbolic backstop is thin (no Slither/Halmos equivalent — see
+//   docs/solana-notes.md §4). Recall therefore rests on hand-written PoCs + disciplined
+//   account-model review. This template is the spine: load the program-under-test's `.so`, set
+//   up the exact accounts/PDAs/mints an attacker would, send the ATTACKER instruction, and end
+//   on a QUANTIFIED assertion — the same "focused test → assertion" shape as Foundry.
+//
+//   LiteSVM is in-process (no validator), so a PoC runs in milliseconds. Use it first. Escalate
+//   to solana-program-test/BanksClient or `anchor test`/local-validator ONLY on a runtime-
+//   semantics wall (see templates/solana/README.md), and record why in the ledger row.
+//
+// CONTRACT (fill per target)
+//   Precondition : the program + honest actors deployed the SAME way an integration deploy would
+//                  (correct program id — PDAs derive from it — mints, ATAs, initial state).
+//   Postcondition: the named theft/lock is demonstrated on CONCRETE on-chain reads (attacker's
+//                  token balance up / vault down / a legit user's funds now unwithdrawable) — NOT
+//                  on a ghost counter this harness itself wrote.
+//   Invariant    : the quantified property that MUST hold (Σ token balances conserved; only the
+//                  owner-signed authority can move funds; shares priced from tracked reserves).
+//                  The PoC breaks exactly one such invariant.
+//   Canary       : assert the ATTACK STATE WAS REACHED (the attacker ix actually executed and
+//                  landed the deep state) before trusting any "held / REFUTED" result. A green
+//                  test that never drove the vulnerable instruction is a lie (repo rule).
+//
+// SETUP
+//   1) Build the target: `anchor build` (Anchor) or `cargo build-sbf` → target/deploy/<prog>.so.
+//      MATCH the target's Anchor/Solana pins first (avm use <ver>) — see docs/solana-notes.md §3.
+//   2) Copy this to the target's `tests/` (or a scratch crate). Add to that crate's Cargo.toml:
+//        [dev-dependencies]
+//        litesvm = "0.15"                    # verified latest on crates.io (2026-07-23)
+//        solana-sdk = "*"                    # pin to match your installed Agave; check crates.io
+//        solana-program = "*"                #   (Agave 3.x/4.x — the sdk crate line diverges; verify)
+//        spl-token = "*"                     # if the target uses SPL Token / Token-2022
+//        spl-associated-token-account = "*"
+//   3) Fill every TODO. Run: `cargo test --release -- --nocapture`  (see logs via --nocapture).
+//
+// NOTE: LiteSVM method names have drifted across 0.x — if a call below doesn't resolve, check
+// docs.rs for your pinned version (e.g. add_program_from_file / send_transaction / get_account).
+// Do NOT paper over a signature mismatch; pin the version and use its real API.
+// ===========================================================================================
+
+use litesvm::LiteSVM;
+use solana_sdk::{
+    account::ReadableAccount,
+    instruction::{AccountMeta, Instruction},
+    message::Message,
+    pubkey::Pubkey,
+    signature::{Keypair, Signer},
+    transaction::Transaction,
+};
+
+// TODO: the program id the `.so` was BUILT for (Anchor `declare_id!`). PDAs derive from this —
+// a wrong id makes every seeded-address check silently mismatch. Rebuild if you change it.
+const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Fill1nProgramIdMatching11111111111111111111");
+
+// System program id as a version-proof literal (all-1s). The `solana_sdk::system_program` module
+// moved out of the crate root in solana-sdk v4 — this literal avoids the churn. VERIFIED to compile
+// against litesvm 0.15 + solana-sdk 4.0.1 (2026-07-23).
+const SYSTEM_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("11111111111111111111111111111111");
+
+// Anchor global instruction discriminator = first 8 bytes of sha256("global:<ix_name>").
+// (Non-Anchor programs: use the target's own instruction tag/enum layout instead.)
+fn anchor_discriminator(ix_name: &str) -> [u8; 8] {
+    use solana_sdk::hash::hash;
+    let h = hash(format!("global:{ix_name}").as_bytes());
+    let mut d = [0u8; 8];
+    d.copy_from_slice(&h.to_bytes()[..8]);
+    d
+}
+
+/// Deploy the program + honest state the way an integration environment would. Keep this the
+/// single source of "how the system stands up" so "reachable here" == "reachable in prod".
+fn setup() -> (LiteSVM, Keypair) {
+    let mut svm = LiteSVM::new();
+
+    // Load the compiled program at its declared id.
+    svm.add_program_from_file(PROGRAM_ID, "target/deploy/PROGRAM.so")
+        .expect("load .so — build it first (anchor build / cargo build-sbf)");
+
+    // Fund a payer/attacker.
+    let attacker = Keypair::new();
+    svm.airdrop(&attacker.pubkey(), 10_000_000_000).unwrap(); // 10 SOL
+
+    // TODO: honest setup — initialize config/vault PDA(s), create mint(s), fund an honest user's
+    // token account with the funds the attacker will try to steal, etc. Do it through the
+    // program's OWN instructions where possible (so the starting state is a real reachable state).
+
+    (svm, attacker)
+}
+
+/// Derive a PDA the way the program does. Confirm the seeds against the on-chain
+/// `seeds = [...]` / `Pubkey::find_program_address` in the source — a seed mismatch here is the
+/// #1 reason a Solana PoC "mysteriously" fails to reproduce.
+fn pda(seeds: &[&[u8]]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(seeds, &PROGRAM_ID)
+}
+
+#[test]
+fn poc_attacker_steals_funds() {
+    let (mut svm, attacker) = setup();
+
+    // ---- pre-state snapshot (the "control" baseline: what is true BEFORE the exploit tx) ----
+    // let (vault_pda, _bump) = pda(&[b"vault"]);
+    // let vault_before = read_u64_field(&svm, &vault_pda, /*offset*/ 8);
+    // let attacker_ata_before = spl_amount(&svm, &attacker_ata);
+
+    // ---- build the ATTACKER instruction (the single tx under test) ----
+    // Anchor: data = discriminator ++ borsh(args). Raw: the program's own tag ++ args.
+    let mut data = anchor_discriminator("withdraw").to_vec();
+    // data.extend_from_slice(&amount.to_le_bytes());   // TODO borsh-encode the args
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            // TODO the EXACT account list the ix expects, in order. This is where account-model
+            // bugs live — e.g. pass the attacker as `authority` (is a missing signer/has_one/owner
+            // check letting an unprivileged signer through?), or pass a duplicate mutable account,
+            // or a look-alike account of the wrong type (cosplay), or a non-canonical-bump PDA.
+            AccountMeta::new(attacker.pubkey(), true), // signer, writable — the attacker
+            // AccountMeta::new(vault_pda, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ],
+        data,
+    };
+
+    let msg = Message::new(&[ix], Some(&attacker.pubkey()));
+    let tx = Transaction::new(&[&attacker], msg, svm.latest_blockhash());
+    let result = svm.send_transaction(tx);
+
+    // ---- COVERAGE CANARY: prove the attacker ix actually executed and reached the deep state.
+    // If it errored, the "exploit" proved nothing — surface that, don't silently pass.
+    let meta = result.expect("attacker tx reverted — exploit path NOT reached; fix the PoC, do \
+                              NOT record REFUTED off a tx that never ran the vulnerable code");
+    // Optionally assert a program log that only prints inside the vulnerable branch:
+    // assert!(meta.logs.iter().any(|l| l.contains("withdraw: transferring")),
+    //         "UNREACHED: vulnerable branch log absent — the ix ran but not the exploit path");
+    let _ = meta;
+
+    // ---- QUANTIFIED assertion: the invariant is broken (theft/lock demonstrated) ----
+    // let vault_after = read_u64_field(&svm, &vault_pda, 8);
+    // let attacker_ata_after = spl_amount(&svm, &attacker_ata);
+    // assert!(attacker_ata_after > attacker_ata_before, "no funds moved to attacker");
+    // assert_eq!(vault_before - vault_after, attacker_ata_after - attacker_ata_before,
+    //            "conservation: what left the vault must equal what the attacker gained");
+    // >>> The assertion that FAILS on a patched program and PASSES here is the finding. <<<
+}
+
+// ---- small readers (fill offsets from the target's #[account] struct layout) ----
+// Anchor accounts begin with an 8-byte discriminator, then borsh fields. `spl_token::state::
+// Account::unpack` reads an SPL token account's `amount`.
+#[allow(dead_code)]
+fn read_u64_field(svm: &LiteSVM, key: &Pubkey, offset: usize) -> u64 {
+    let acct = svm.get_account(key).expect("account missing");
+    let bytes = &acct.data()[offset..offset + 8];
+    u64::from_le_bytes(bytes.try_into().unwrap())
+}

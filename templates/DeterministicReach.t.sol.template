@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+// ===========================================================================================
+// DETERMINISTIC REACHABILITY TEST TEMPLATE  (T7 — the non-flaky companion to the coverage canary)
+// ---
+// WHY THIS EXISTS (engagement 12 run): the probabilistic coverage canary — assert a deep state was NEVER
+// reached, watch it FAIL to prove the fuzzer got there — is FLAKY on long dependency chains. If the
+// fuzzer needs a 6-call sequence (deposit -> migrate -> settle -> service -> request -> redeem) to
+// reach the exploit state, a bounded random campaign may never hit it, and the canary then stays
+// green (never trips) exactly like a genuinely-unreachable state. A green invariant that never ran
+// the code is a lie — and a fuzz "REFUTED" is only trustworthy once you have PROVEN the exploit path
+// is reachable. This test does that deterministically: it hand-drives the exact worst-case sequence
+// and asserts the deep state was reached. Pair one of these with every fuzz campaign whose target
+// state sits behind a multi-call chain.
+//
+// CONTRACT:
+//   Precondition : the protocol + actors are deployed the same way the invariant harness deploys them.
+//   Postcondition: the named deep state (the one the invariant/PoC depends on) is provably reached,
+//                  asserted on concrete on-chain reads — NOT on a ghost counter the harness also writes.
+//   Invariant    : this test is deterministic (no fuzz inputs) so it either reaches the state on every
+//                  run or never does; a flake here is a real bug in the sequence, not sampling noise.
+//
+// Copy to test/reach/<Protocol>Reach.t.sol and fill the TODOs.
+// ===========================================================================================
+
+import {Test} from "forge-std/Test.sol";
+// TODO import the full deploy helper, the protocol interface, token mock, position/NFT type.
+
+contract DeterministicReachTest is Test {
+    address internal admin = makeAddr("admin");
+    address internal alice = makeAddr("alice");   // unprivileged actor A
+    address internal bob   = makeAddr("bob");     // unprivileged actor B (forces multi-entity seams)
+
+    function setUp() public {
+        // Deploy EXACTLY as the whole-system invariant harness does, so "reachable here" == "reachable
+        // under fuzz". 1. token + protocol; 2. register product(s)/market(s); 3. fund actors.
+    }
+
+    /// @dev Drive the exact call sequence the exploit / invariant depends on, then assert the deep
+    ///      state was reached on CONCRETE reads. This is the sequence a bounded fuzz run may miss.
+    ///      Example seam (engagement 12 shaped): composite state across migration + live settlement + servicing
+    ///      + 7540 request interleaved — the seam no point-audit modeled together.
+    function test_reach_deepState() public {
+        // ---- the multi-call chain to the deep state (fill with the real entry points) ----
+        // vm.prank(alice); protocol.deposit(productId, amount);
+        // vm.prank(admin); protocol.migrate(productId);
+        // vm.prank(admin); protocol.settle(productId, rate);      // live exchange settlement
+        // vm.prank(admin); protocol.service(productId);           // servicer discretion path
+        // vm.prank(bob);   protocol.requestRedeem(productId, shares); // 7540 controller path
+        // vm.prank(bob);   protocol.redeem(productId);
+
+        // ---- PROVE reach on concrete state, not on a harness-written ghost ----
+        // assertGt(protocol.pendingRedeem(productId, bob), 0, "UNREACHED: redeem path never entered");
+        // assertTrue(protocol.isSettled(productId), "UNREACHED: settlement state not entered");
+        // If any assert fails, the exploit path is NOT reachable as written — fix the sequence before
+        // trusting ANY fuzz "REFUTED" that assumed this state.
+    }
+
+    // Once this passes, the paired invariant/PoC's green/red result is trustworthy: you have shown the
+    // code the assertion guards is actually exercised. Keep this test in the suite (do NOT delete it,
+    // unlike the throwaway canary) — it is the standing proof-of-reachability for the seam.
+}

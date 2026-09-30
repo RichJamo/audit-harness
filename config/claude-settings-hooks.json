@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Reference copy of the GLOBAL Claude Code hooks this toolkit owns.",
+    "",
+    "Claude Code does NOT read this file. It is the written-down record of what",
+    "~/.claude/settings.json is supposed to contain, so the configuration is",
+    "recoverable and reviewable instead of living only on one disk.",
+    "",
+    "Install or repair with:  tooling/install-hooks.sh",
+    "Check for drift with:    tooling/install-hooks.sh --check",
+    "",
+    "Only SessionStart lives here. PreToolUse and Stop are declared in",
+    "skill/SKILL.md's frontmatter, which is already version-controlled and travels",
+    "with the skill. SessionStart cannot go there: a skill loads mid-session, so a",
+    "SessionStart hook declared in it would never fire.",
+    "",
+    "The command is deliberately tolerant. The doctor lives in a git repo whose",
+    "branch can change, and a SessionStart hook that errors would greet every",
+    "session with a failure. It prints nothing unless an engagement would actually",
+    "block a TIER-1 promotion."
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D=\"$HOME/audit-toolkit/tooling/engagement-doctor.py\"; [ -x \"$D\" ] && python3 \"$D\" --all --quiet || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+// ===========================================================================================
+// WHOLE-SYSTEM STATEFUL INVARIANT TEMPLATE  (highest-recall artifact)
+// Copy to test/invariant/System.invariant.t.sol and fill the TODOs.
+//
+// Unlike a single-contract harness, this deploys the FULL protocol and registers EVERY
+// unprivileged entry point (and the privileged ones, pranked) as fuzz actions, then asserts a
+// BROAD property set. The point is to surface bugs you never hypothesized — the unknown-unknowns
+// that argument-driven hunting misses. Run it long, and ALWAYS prove coverage with the canary.
+//
+// Properties to assert (pick all that apply — breadth is the recall):
+//   - SOLVENCY        : every party can always be paid what they're owed (Σ credits ≤ balance)
+//   - CONSERVATION    : value in == paid out + withdrawn-to-sink + held
+//   - NO-OVERPAY      : Σ paid ≤ legit obligations + rounding tolerance (compute from the protocol's libs)
+//   - MONOTONICITY    : counters that must only grow/shrink never reverse (paidOut, totalSold, ...)
+//   - NO-USER-WORSE-OFF: an action by X never reduces what Y is owed
+//   - ACCESS          : an unprivileged actor never mutates privileged state
+// ===========================================================================================
+
+import {Test} from "forge-std/Test.sol";
+// TODO: import the full system: factories, token, currencies, payout/sale/vesting contracts.
+
+contract SystemHandler is Test {
+    // TODO: protocol handles + the set of currencies/assets in play.
+    address[] public actors;          // unprivileged users
+    address public owner;             // privileged
+    // ---- ghosts (closed-system accounting) ----
+    mapping(address => uint256) public ghostIn;   // per-currency value that entered
+    mapping(address => uint256) public ghostOut;  // per-currency value that left to users
+    // ---- coverage counters (one per deep action; the canary asserts these are reached) ----
+    uint256 public covBuy; uint256 public covClaim; uint256 public covWithdraw;
+    uint256 public covSwitch; uint256 public covAdminAction;
+
+    constructor(/* system handles, */ address _owner) {
+        owner = _owner;
+        for (uint256 i = 0; i < 5; i++) actors.push(makeAddr(string(abi.encodePacked("actor", vm.toString(i)))));
+        // TODO: pre-approve protocol with max allowance for every actor + currency (mind USDT 0->max-only).
+    }
+
+    // --- actions: each guarded + try/catch so a revert never aborts the run; invariants do the checking ---
+    // Measure balance deltas around every external call so ghosts stay honest.
+
+    function doBuy(uint256 actorSeed, uint256 amtSeed) external {
+        // pick actor; bound amount to available inventory; mint+approve currency; prank; try buy { covBuy++; } catch {}
+    }
+    function doClaim(uint256 actorSeed) external {
+        // prank an eligible actor; measure currency delta; try claim { ghostOut += delta; covClaim++; } catch {}
+    }
+    function doWithdraw(uint256 seed) external {
+        // pull-payout withdrawal; prank the credited account; try { covWithdraw++; } catch {}
+    }
+    function doSwitchCurrency(uint256 seed) external {
+        // owner flips currency/price (exercises multi-asset accounting seams); prank owner; try { covSwitch++; } catch {}
+    }
+    function doAdminAction(uint256 seed) external {
+        // a NORMAL (non-malicious) privileged action — drain-after-lock, reassign, snapshot, pause.
+        // Include these: an unprivileged action that exploits the RESULT is the in-scope bug.
+        // prank owner; try { covAdminAction++; } catch {}
+    }
+    function doWarp(uint256 t) external { vm.warp(block.timestamp + bound(t, 1 hours, 30 days)); }
+}
+
+contract SystemInvariantTest is Test {
+    SystemHandler handler;
+    address owner = makeAddr("owner");
+
+    function setUp() public {
+        // 1. deploy the full system (factories, token, currencies, payout/sale contracts);
+        // 2. seed inventory/funding; 3. handler = new SystemHandler(system..., owner);
+        // 4. targetContract(address(handler));
+    }
+
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_solvency() public view {
+        // for each currency C: assertGe(C.balanceOf(address(protocol)), sumOwed(C), "INSOLVENT");
+    }
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_conservation() public view {
+        // for each currency C: assertEq(handler.ghostIn(C), handler.ghostOut(C) + held(C) + sink(C), "leak");
+    }
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_noOverpay() public view {
+        // assertLe(totalPaid, principalOwed + expectedYield + tolerance);  // cap from the protocol's OWN libs
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // COVERAGE CANARY — run, watch it FAIL, then flip to the real gate. Proves the fuzzer reached
+    // the deep states; a green invariant that never exercised buy/claim/withdraw/switch is worthless.
+    //   function afterInvariant() public view {
+    //     require(handler.covBuy()==0 && handler.covClaim()==0 && handler.covWithdraw()==0
+    //          && handler.covSwitch()==0, "CANARY: deep states reached -> coverage proven");
+    //   }
+    // Real gate after the canary fails as expected:
+    function afterInvariant() public view {
+        assertGt(handler.covBuy(), 0, "coverage: no buys");
+        assertGt(handler.covClaim(), 0, "coverage: no claims");
+        assertGt(handler.covWithdraw(), 0, "coverage: no withdrawals");
+        assertGt(handler.covSwitch(), 0, "coverage: never exercised the multi-asset seam");
+    }
+    // Run hard: FOUNDRY_INVARIANT_RUNS=400 FOUNDRY_INVARIANT_DEPTH=500 forge test --mt invariant_
+}

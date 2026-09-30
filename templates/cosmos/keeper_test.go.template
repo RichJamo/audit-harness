@@ -1,0 +1,179 @@
+// ===========================================================================================
+// COSMOS-SDK L1 EXPLOIT-PoC HARNESS — keeper/message test   [analog of a focused Foundry test]
+// ---
+// WHY THIS EXISTS
+//   On a Cosmos L1 the static/symbolic backstop for the money classes is near-nil (no Slither/
+//   Halmos; no linter catches the halt class — see docs/cosmos-notes.md §4). Recall therefore
+//   rests on hand-written Go PoCs + disciplined state-machine review. This template is the spine
+//   for the SINGLE-MODULE bug classes (theft, invariant break, authority bypass, ante gap): stand
+//   up the module's keeper on an in-memory store, drive the ATTACKER message, and end on a
+//   QUANTIFIED assertion — the same "focused test → assertion" shape as Foundry.
+//
+//   In-process (no running node), so a PoC runs in milliseconds. Use it first. Escalate to the
+//   app-level determinism harness (app_determinism_test.go.template) for halt/nondeterminism
+//   classes, or to localnet_repro.sh.template for a validator-observable halt — and record why in
+//   the ledger row.
+//
+// CONTRACT (fill per target)
+//   Precondition : the keeper + honest state are set up the way an integration deploy would
+//                  (correct params, module account funded, a legit user's funds present).
+//   Postcondition: the named theft/lock/break is demonstrated on CONCRETE state reads (attacker
+//                  balance up / module account down / a legit user's funds now unwithdrawable /
+//                  a registered invariant now reporting broken) — NOT a counter this harness wrote.
+//   Invariant    : the quantified property that MUST hold (Σ balances conserved; only the correct
+//                  authority mutates privileged state; supply == tracked). The PoC breaks exactly one.
+//   Canary       : assert the ATTACK STATE WAS REACHED — the attacker msg actually executed and
+//                  landed the deep state (err == nil where success is the exploit, or the exact
+//                  predicted error) — before trusting any "held / REFUTED" result. A green test that
+//                  never drove the vulnerable handler is a lie (repo rule).
+//
+// SETUP
+//   1) Match the target's go.mod versions (cosmos-sdk / cometbft / cosmossdk.io/math) — the keeper
+//      test setup helpers differ across SDK v0.47/v0.50/v0.53. Prefer the target module's OWN
+//      test setup (most modules ship `keeper_test.go` / a `testutil` fixture) — reuse it, don't
+//      reinvent the store/context wiring.
+//   2) Copy this into the target module's package (e.g. x/mymodule/keeper/) so internal helpers
+//      and the module's own fixtures are in scope.
+//   3) Fill every TODO. Run:  go test ./x/<module>/... -run TestPoC -v
+//
+// NOTE: SDK keeper-test scaffolding drifts across versions (testutil.DefaultContextWithDB,
+// keepertest fixtures, the depinject/app-wiring test helpers). If a helper below doesn't resolve,
+// use the TARGET module's existing test setup rather than papering over the signature. Do NOT
+// invent an API — pin to the target's SDK version and use its real one.
+//
+// SETUP REALITY (validated end-to-end on a real Cosmos keeper bug — engagement 13 H-01 tracer-bullet,
+// 2026-07-24; the scaffold's shape held, these are the things it under-stated):
+//   • The fixture may live IN the test package itself (`package keeper_test`, an in-file
+//     `createDefaultTestInput(t)`), NOT a separate `testutil/keeper` package. So this PoC MUST be
+//     `package <module>_test` and dropped INTO `x/<module>/keeper/` to reach unexported helpers
+//     (deploy/mint/address helpers). Copy the repo to a WRITABLE dir first — never mutate a
+//     read-only engagement checkout; add your test there.
+//   • Deps are often HAND-WIRED (MountStoreWithDB + manual keeper construction), not depinject,
+//     and collaborators may be MOCKS the fixture ships (e.g. a MockCommunityPoolKeeper). Read what
+//     the mock RECORDS — asserting on a mocked collaborator's recorded state is a first-class,
+//     faithful post-state (see the mock-assertion variant in PoC 1).
+//   • A bug can live in an ARGUMENT the module passes to a collaborator, not in a bank-balance
+//     delta. If so, assert on what the module PASSED (the mock's tally), not only on GetBalance.
+//   • Reaching the vulnerable branch may need the module's OWN tx/EVM helpers to build
+//     preconditions (e.g. real `evm/0x..` denoms via deployERC20/mintERC20 before BurnCoins).
+//   • AMPLIFY so a loop bug shows as a NUMBER: if a per-item loop misuses the whole set, drive it
+//     with >=2 qualifying items so the N x over-move is an unmissable quantified break (1 item can
+//     hide it — the module's own existing test missed H-01 for exactly this reason).
+//   • CONFIRM THE ASSERTION DISCRIMINATES: flip the one-line fix, re-run, see the test FAIL, then
+//     revert. A PoC whose assertion passes on patched code proves nothing (PP Tip 37).
+// ===========================================================================================
+
+package keeper_test
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"cosmossdk.io/math"
+	// TODO: import the target module's keeper, types, and its test fixture, e.g.:
+	//   "<module-path>/x/mymodule/keeper"
+	//   "<module-path>/x/mymodule/types"
+	//   keepertest "<module-path>/testutil/keeper"
+)
+
+// setupKeeper builds the module keeper + a context on an in-memory store, wiring the bank/account
+// keepers (real or mocked) the target needs. PREFER the target's own fixture — this is a sketch.
+func setupKeeper(t *testing.T) (sdk.Context, /* keeper.Keeper */ any, /* deps */ any) {
+	t.Helper()
+	// TODO: k, ctx := keepertest.MyModuleKeeper(t)   // use the target's fixture if it ships one
+	// TODO: seed honest state through the module's OWN msgs/genesis so the start state is REACHABLE:
+	//   - set params, fund the module account with the funds the attacker will try to steal,
+	//   - create a legit user's position/registry entry, etc.
+	// return ctx, k, deps
+	t.Skip("fill setupKeeper from the target module's testutil fixture")
+	return sdk.Context{}, nil, nil
+}
+
+// ------------------------------------------------------------------------------------------
+// PoC 1 — theft / conservation break via a message handler
+// ------------------------------------------------------------------------------------------
+func TestPoC_AttackerDrainsModuleAccount(t *testing.T) {
+	ctx, _ /*k*/, _ /*deps*/ := setupKeeper(t)
+
+	attacker := sdk.AccAddress([]byte("attacker____________"))
+
+	// ---- pre-state snapshot (the control baseline) ----
+	// moduleBefore := deps.Bank.GetBalance(ctx, moduleAcc, denom).Amount
+	// attackerBefore := deps.Bank.GetBalance(ctx, attacker, denom).Amount
+	var moduleBefore, attackerBefore math.Int
+
+	// ---- build + run the ATTACKER message (the single call under test) ----
+	// This is where the account-model-free authority bug lives: pass the attacker as an authority
+	// the handler never checks, a duplicate/wrong reference, an amount that underflows, a
+	// wrong-denom coin credited as the real asset, etc. Enumerate the substitution explicitly.
+	// msg := &types.MsgWithdraw{ Authority: attacker.String(), Amount: sdk.NewCoin(denom, someAmt) }
+	// _, err := msgServer.Withdraw(ctx, msg)
+	var err error = nil // TODO real call
+
+	// ---- COVERAGE CANARY: prove the attacker path actually executed and reached the deep state.
+	// Where success IS the exploit, require err == nil; where the exploit is a specific failure,
+	// require THAT exact error. A handler that reverted before the vulnerable code proves nothing.
+	require.NoError(t, err,
+		"attacker msg failed before the exploit path ran — fix the PoC; do NOT record REFUTED off a "+
+			"handler that never executed the vulnerable code")
+
+	// ---- QUANTIFIED assertion: the invariant is broken (theft demonstrated) ----
+	// moduleAfter := deps.Bank.GetBalance(ctx, moduleAcc, denom).Amount
+	// attackerAfter := deps.Bank.GetBalance(ctx, attacker, denom).Amount
+	// require.True(t, attackerAfter.GT(attackerBefore), "no funds moved to attacker")
+	// require.True(t, moduleAfter.LT(moduleBefore), "module account not drained")
+	// require.True(t, attackerAfter.Sub(attackerBefore).Equal(moduleBefore.Sub(moduleAfter)),
+	//     "conservation: what left the module must equal what the attacker gained")
+	_ = moduleBefore
+	_ = attackerBefore
+	// >>> The assertion that FAILS on a patched chain and PASSES here is the finding. <<<
+	//
+	// VARIANT — assert on what the module PASSED to a mocked collaborator (validated on engagement 13 H-01,
+	// where the bug is a wrong ARGUMENT to FundCommunityPool, not a bank delta). If the fixture wires
+	// a mock, read its recorded tally as the post-state, and AMPLIFY with >=2 qualifying coins:
+	//   // burn {foo:50, baz:50}; the per-coin loop wrongly passes the WHOLE set each iteration →
+	//   // the mock records foo=100/baz=100 (200 moved vs 100 burned = a clean 2x over-move).
+	//   require.Equal(t, math.NewInt(100), deps.MockCommunityPool.CommunityPool.AmountOf("foo"),
+	//       "over-move: burned 50 foo but the per-coin loop moved the full set twice (100)")
+	//   // >>> flip the one-line fix (`amount` -> sdk.NewCoins(coin)), re-run, watch this FAIL,
+	//   //     then revert — proving the assertion discriminates buggy from patched (PP Tip 37). <<<
+}
+
+// ------------------------------------------------------------------------------------------
+// PoC 2 — registered module invariant driven false (conservation / solvency break, → PC §3)
+// Assert via the module's OWN RegisterInvariants function, so "broken" is the chain's own verdict,
+// not the harness's opinion. This is the strongest form of a conservation PoC on an L1.
+// ------------------------------------------------------------------------------------------
+func TestPoC_InvariantBroken(t *testing.T) {
+	ctx, _ /*k*/, _ := setupKeeper(t)
+
+	// TODO: drive the op sequence that should preserve the invariant but doesn't (mint without
+	// record, double-count, missing decrement, live-balance-vs-tracked mismatch — checklist §14-16).
+
+	// ---- run the module's registered invariant and assert it now reports BROKEN ----
+	// inv := keeper.AllInvariants(k)          // or the specific invariant function
+	// msg, broken := inv(ctx)
+	// require.True(t, broken, "invariant still holds — exploit did not break conservation: %s", msg)
+	_ = ctx
+}
+
+// ------------------------------------------------------------------------------------------
+// PoC 3 — authority / access-control bypass on a privileged setter (→ PC §9.4)
+// ------------------------------------------------------------------------------------------
+func TestPoC_UnauthorizedPrivilegedSetter(t *testing.T) {
+	ctx, _ /*k*/, _ := setupKeeper(t)
+	attacker := sdk.AccAddress([]byte("attacker____________"))
+
+	// msg := &types.MsgUpdateParams{ Authority: attacker.String(), Params: attackerChosen }
+	// _, err := msgServer.UpdateParams(ctx, msg)
+	var err error = nil
+
+	// CANARY + assertion: a SECURE chain rejects a non-authority signer. If err == nil here, the
+	// privileged state changed under the attacker's control — that's the finding.
+	require.NoError(t, err, "if this errors, the authority check IS enforced — no bug (record REFUTED)")
+	// require.Equal(t, attackerChosen, k.GetParams(ctx), "attacker set privileged params")
+	_ = ctx
+	_ = attacker
+}

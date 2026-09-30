@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>&lt;Target&gt; — security review</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 16mm 16mm; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html { font-size: 10.5pt; }
+  body {
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    color: #1a1a1a; line-height: 1.5; margin: 0;
+  }
+  h1 { font-size: 21pt; margin: 0 0 2px; letter-spacing: -0.4px; }
+  h2 {
+    font-size: 13pt; margin: 26px 0 10px; padding-bottom: 5px;
+    border-bottom: 1.5px solid #1a1a1a;
+  }
+  h3 { font-size: 11.5pt; margin: 20px 0 6px; }
+  p { margin: 0 0 9px; }
+  ul { margin: 0 0 9px; padding-left: 18px; }
+  li { margin-bottom: 4px; }
+  code {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.87em; background: #f2f2f0; padding: 1px 4px; border-radius: 3px;
+  }
+  .sub { color: #666; font-size: 9.5pt; margin-bottom: 16px; }
+
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 14px; font-size: 9.5pt; }
+  th { text-align: left; background: #f2f2f0; font-weight: 600; }
+  th, td { padding: 6px 8px; border: 1px solid #ddd; vertical-align: top; }
+
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 3px;
+    font-size: 8.5pt; font-weight: 700; color: #fff; white-space: nowrap;
+  }
+  .high { background: #c0392b; }
+  .med  { background: #e07b1c; }
+  .low  { background: #d4a017; }
+  .open { background: #555; }
+  .anyone { background: #7b1fa2; }
+  .keyed { background: #90918f; }
+
+  .meta { background: #fafaf8; border: 1px solid #e2e2de; margin: 8px 0 12px; font-size: 9pt; }
+  .meta td { border: none; border-bottom: 1px solid #ececea; padding: 4px 8px; }
+  .meta tr:last-child td { border-bottom: none; }
+  .meta td:first-child { color: #666; width: 96px; }
+
+  .finding { page-break-inside: avoid; margin-bottom: 22px; }
+  .callout {
+    background: #fdf6f5; border-left: 3px solid #c0392b;
+    padding: 8px 12px; margin: 10px 0;
+  }
+  .fix { background: #f5f8f5; border-left: 3px solid #4a7c4e; padding: 8px 12px; margin: 10px 0; }
+  .fix strong, .callout strong { display: block; margin-bottom: 3px; }
+  .scorebox { font-size: 9pt; color: #444; margin: 6px 0 10px; }
+  .scorebox span { margin-right: 14px; }
+  hr { border: none; border-top: 1px solid #e2e2de; margin: 22px 0; }
+  .pagebreak { page-break-before: always; }
+  .cols { display: flex; gap: 18px; align-items: flex-start; }
+  .cols > div { flex: 1; }
+  .cols table { margin-top: 0; }
+</style>
+</head>
+<body>
+<h1>&lt;Target&gt; — security review</h1>
+<div class="sub">
+  Reviewed &lt;date&gt; · &lt;reviewer&gt;<br>
+  Repository <code>&lt;repo&gt;</code> @ <code>&lt;commit&gt;</code>, against the live deployment on &lt;chain&gt;<br>
+  Proxy <code>0x…</code> · implementation <code>0x…</code>
+</div>
+
+<div class="callout" style="border-left-color:#4a7c4e; background:#f5f8f5;">
+<strong>Nothing in this review touched your live contract</strong>
+Every exploit below was executed against a <em>local fork</em> of &lt;chain&gt; at block &lt;N&gt; — a
+private copy of chain state on our machine. No transaction was broadcast, no state was modified, and
+no funds moved.
+</div>
+
+<p>Some findings cite <strong>live measurements</strong>. Those are <em>reads</em> of real state.
+Every finding's <strong>Evidence</strong> row says which kind it is: <em>fork simulation</em>,
+<em>on-chain read</em>, or both.</p>
+
+<h2>Start here</h2>
+<p><strong>&lt;N&gt; of these need no special access — anyone with a wallet can do them today:</strong></p>
+<ul><li><strong>ID</strong> — one line, plain English.</li></ul>
+<p>The remaining findings need one of your keys. The most important of those is <strong>ID</strong>: …</p>
+
+<div class="pagebreak"></div>
+<h2>Summary</h2>
+<div class="cols">
+  <div><table>
+    <tr><th>Severity</th><th style="width:60px">Count</th></tr>
+    <tr><td><span class="badge high">HIGH</span></td><td>0</td></tr>
+    <tr><td><span class="badge med">MEDIUM</span></td><td>0</td></tr>
+    <tr><td><span class="badge low">LOW</span></td><td>0</td></tr>
+    <tr><td style="font-weight:600">Total</td><td style="font-weight:600">0</td></tr>
+  </table></div>
+  <div><table>
+    <tr><th>Status</th><th style="width:60px">Count</th></tr>
+    <tr><td>Open</td><td>0</td></tr>
+    <tr><td>Fixed</td><td>0</td></tr>
+    <tr><td>Mitigated / Acknowledged</td><td>0</td></tr>
+    <tr><td>Won't fix</td><td>0</td></tr>
+  </table></div>
+</div>
+
+<table>
+  <tr><th style="width:52px">ID</th><th>Finding</th><th style="width:74px">Severity</th>
+      <th style="width:88px">Who can do it</th><th style="width:56px">Status</th></tr>
+  <tr><td>XX-01</td><td>…</td>
+      <td><span class="badge high">HIGH</span></td><td><span class="badge anyone">Anyone</span></td>
+      <td><span class="badge open">Open</span></td></tr>
+</table>
+
+<h3>How severity is scored</h3>
+<p>Impact and likelihood are scored separately, 1–5, and severity follows from the pair. Both are
+stated on every finding so you can disagree with a number rather than with a judgement. Status
+values are <em>Open</em>, <em>Fixed</em>, <em>Mitigated</em>, <em>Acknowledged</em> and
+<em>Won't fix</em> — tell us which applies and we'll re-issue.</p>
+
+<div class="pagebreak"></div>
+<h2>Privileged roles</h2>
+<table>
+  <tr><th style="width:110px">Role</th><th style="width:200px">Live address</th><th>Can do</th></tr>
+  <tr><td><strong>…</strong></td><td><code>0x…</code></td><td>…</td></tr>
+</table>
+
+<div class="pagebreak"></div>
+<h2>Findings</h2>
+
+<div class="finding">
+<h3>XX-01 — &lt;plain-English title&gt;</h3>
+<table class="meta">
+  <tr><td>Severity</td><td><span class="badge high">HIGH</span></td></tr>
+  <tr><td>Impact</td><td>N/5 — why</td></tr>
+  <tr><td>Likelihood</td><td>N/5 — why</td></tr>
+  <tr><td>Access</td><td><span class="badge anyone">Anyone</span></td></tr>
+  <tr><td>Files</td><td><code>…</code></td></tr>
+  <tr><td>Evidence</td><td><strong>Fork simulation</strong> — <code>PoC_….t.sol</code></td></tr>
+  <tr><td>Status</td><td><span class="badge open">Open</span></td></tr>
+</table>
+
+<p>Mechanism, plainly.</p>
+<p>Measurement, with the method named.</p>
+
+<div class="callout"><strong>Only if the rating needs justifying</strong>…</div>
+
+<div class="fix"><strong>Fix</strong>
+Concrete. Say which option you'd pick and what it costs.
+CHECK before shipping: does this fix introduce a new problem? Walk the code as if it were applied.
+</div>
+</div>
+
+<div class="pagebreak"></div>
+<h2>What we checked and found sound</h2>
+<p>Worth knowing where we looked and came away satisfied:</p>
+<ul><li><strong>Topic.</strong> Specific claim. CHECK every quantifier here — "every", "all",
+"no path" — one counter-example makes it false.</li></ul>
+
+<h2>Scope limits</h2>
+<ul><li><strong>…was not reviewed</strong> — and what that means for which finding.</li></ul>
+
+<div class="pagebreak"></div>
+<h2>Notes for a future version</h2>
+<p>Not findings — things to know if you write a vNext:</p>
+<ul><li>…</li></ul>
+
+<h2>Open questions</h2>
+<ol><li>… (each should change a severity or an impact)</li></ol>
+
+<h2>Reproducing this</h2>
+<p>Harness handover, toolchain pins.</p>
+
+</body>
+</html>

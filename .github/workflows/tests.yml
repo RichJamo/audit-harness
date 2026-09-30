@@ -1,0 +1,131 @@
+name: tests
+
+# The guards check the ledger; until now nothing checked the guards. This PR's own thesis is
+# that a rule holds when something OUTSIDE the model verifies it, so 96 tests that run only
+# when someone remembers is the same failure one level up.
+#
+# No continue-on-error, no soft-fail steps: a red run must block.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  lint:
+    # Correctness rules only -- the ruleset and the reason it is narrow live in ruff.toml.
+    # An undefined name crashed the Stop hook for weeks while every test passed; this is the
+    # check that would have caught it on the day it was written.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet --disable-pip-version-check "ruff==0.16.7"
+      - name: ruff (config in ruff.toml)
+        run: ruff check tooling
+
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor we actually rely on (is_relative_to needs 3.9, the walrus and
+        # `X | None` annotations are covered by `from __future__ import annotations`).
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pyyaml
+        # ledger_guard G1 reads the DEDUP sidecar. Without pyyaml it FAILS CLOSED by design,
+        # so a missing dependency here would look like a guard bug rather than a setup error.
+        run: python -m pip install --quiet --disable-pip-version-check pyyaml
+
+      - name: Guard tests
+        run: |
+          python -m unittest \
+            tooling.guards.test_ledger_guard \
+            tooling.guards.test_ledger_state_guard -v
+
+      - name: Prior-art extractor tests
+        # NOT in the unittest list above, deliberately. This file is pytest-style -- five
+        # bare `def test_*` functions, no TestCase -- so `python -m unittest` collects ZERO
+        # of them and reports OK, and pytest is not installed on this toolchain. It carries
+        # its own __main__ runner for that reason; this step is the thing that calls it.
+        # It was on disk and unrun by CI from the day it shipped (found 2026-09-15).
+        run: python tooling/guards/test_extract_prior_art.py
+
+      - name: Ledger CLI -- golden AND poisoned fixtures
+        # The poisoned cases are the point: a CLI that ACCEPTS a malformed promotion
+        # fails the build. A suite that only feeds itself valid input is the "green
+        # suite that never ran the code under test" the guards handover warns about.
+        run: python -m unittest tooling.ledger.test_ledger_cli -v
+
+      - name: Other tooling tests
+        # This list is EXPLICIT, so a new test file runs only when someone adds it here --
+        # and on 2026-09-15 three were found that nobody had. If you add a test module, add
+        # it here in the same commit. The list is trimmed to the modules this release ships;
+        # the private toolkit's list is longer.
+        run: |
+          python -m unittest \
+            tooling.test_bootstrap \
+            tooling.test_engagement_doctor \
+            tooling.test_install_hooks -v
+
+  scaffold:
+    # End-to-end: the scaffold must produce a ledger the guards can read AND actually guard.
+    # It self-checks and exits non-zero on failure, so this step needs no extra assertions
+    # beyond proving an illegal promotion is refused.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet --disable-pip-version-check pyyaml
+
+      - name: Scaffold an engagement and prove it is guarded
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/eng
+          ./tooling/new-engagement.sh ci-target /tmp/eng
+          # prior-art must be a link to prior-audits, so a corpus saved under either name is read
+          test "$(readlink /tmp/eng/ci-target/00-triage/prior-art)" = prior-audits
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "tooling/guards")
+          from ledger_guard import evaluate, parse_rows, engagement_root
+
+          led = Path("/tmp/eng/ci-target/ledger/ledger.md")
+          scaffold = led.read_text()
+
+          # board-redraw fix (2026-09-18): the scaffold no longer ships an example row.
+          # That row parsed as a real UNTESTED row but was never created through the
+          # ledger CLI, so the CLI's first auto-redraw did not know about it, silently
+          # dropped it, and a later guard check flagged it as vanished (G3) on an
+          # engagement that never had a real hypothesis in it. A clean, empty table is
+          # the correct starting state.
+          assert not parse_rows(scaffold), "scaffold should ship with no rows"
+          assert engagement_root(led) is not None, "scaffolded ledger has no engagement root"
+          assert evaluate(led, scaffold) == [], "empty scaffold is not clean"
+
+          # Prove the scaffold is GUARDED the way it is actually used: a human hand-writes
+          # the first hypothesis into the empty table before the ledger CLI ever touches it,
+          # and saves it -- then a later illegal edit is checked against THAT saved state.
+          content = scaffold.rstrip("\n") + "\n| H1 | fee rounds down |  |  | UNTESTED |  |  |\n"
+          assert parse_rows(content), "a hand-written row does not parse"
+          assert evaluate(led, content) == [], "a freshly hand-written row is not clean"
+          led.write_text(content)
+
+          illegal = content.replace("| H1 | fee rounds down |  |  | UNTESTED |",
+                                    "| H1 | fee rounds down |  |  | CONFIRMED |")
+          errs = evaluate(led, illegal)
+          assert any("skips TIER-1" in e for e in errs), f"guard did not fire: {errs}"
+          print("scaffold is parsed, rooted, and guarded")
+          PY

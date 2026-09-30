@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+// ===========================================================================================
+// INVARIANT TEST TEMPLATE
+// Copy to test/invariant/<Protocol>.invariant.t.sol. Deploy the system, register the
+// handler as the fuzz target, and assert conservation + no-overpay. ALWAYS prove coverage
+// with the canary before trusting a green run.
+// ===========================================================================================
+
+import {Test} from "forge-std/Test.sol";
+// import {Handler} from "./Handler.sol";
+// import {IProtocol} ...; import {MockToken} ...;
+
+contract ProtocolInvariantTest is Test {
+    // Handler handler;
+    // IProtocol protocol; MockToken token;
+    address admin = makeAddr("admin");
+
+    function setUp() public {
+        // 1. deploy token + protocol; 2. register product(s)/market(s);
+        // 3. handler = new Handler(protocol, token, admin);
+        // 4. targetContract(address(handler));
+    }
+
+    /// @dev Conservation: value in == paid to users + withdrawn to sink + still held.
+    ///      Validates the harness AND catches any unaccounted movement.
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_conservation() public view {
+        // assertEq(handler.ghostFundedIn(),
+        //   handler.ghostPaidOut() + handler.ghostWithdrawn() + token.balanceOf(address(protocol)),
+        //   "conservation broken");
+    }
+
+    /// @dev No-overpay: total paid out can never exceed legit obligations + rounding tolerance.
+    ///      A double-pay or rounding drain trips this. Compute the cap from the protocol's OWN
+    ///      math libs (yield/principal/tolerance) using current state, not magic numbers.
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_noOverpay() public view {
+        // uint256 cap = principalOwed + expectedYield + tolerance; // from the protocol's libs
+        // assertLe(handler.ghostPaidOut(), cap, "OVERPAY");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // COVERAGE CANARY (run, watch it FAIL, then delete). Proves the fuzzer reached deep states;
+    // a green invariant that never exercised the code is worthless.
+    //   function afterInvariant() public view {
+    //     require(handler.covRedeem() == 0 && handler.covClaim() == 0,
+    //       "CANARY: reached redeem/claim -> coverage confirmed");
+    //   }
+    // Run: FOUNDRY_INVARIANT_RUNS=10 FOUNDRY_INVARIANT_DEPTH=1500 forge test --mt invariant_noOverpay
+    // ---------------------------------------------------------------------------------------
+}

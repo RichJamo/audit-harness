@@ -1,0 +1,153 @@
+// ===========================================================================================
+// SOLANA EXPLOIT-PoC HARNESS — LiteSVM / bankrun (TypeScript)  [analog of a focused Foundry test]
+// ---
+// WHY THIS EXISTS
+//   Anchor projects ship TS test infra, so a TS PoC is often the lowest-friction path — and the
+//   TS runtimes are already installed on this box, so this works the moment you `npm i` even
+//   before the full Rust/Anchor chain is set up (you only need the target `.so`; see
+//   docs/solana-notes.md §2). Same discipline as the Rust template and Foundry: load the `.so`,
+//   set up attacker accounts/PDAs/mints, send the ATTACKER instruction, end on a QUANTIFIED
+//   assertion, and a COVERAGE CANARY that the attack state was actually reached.
+//
+// TWO in-process VMs, pick one (both fast, no validator):
+//   • LiteSVM  — `npm i litesvm @solana/web3.js`            (shown as the primary path below)
+//   • bankrun  — `npm i solana-bankrun anchor-bankrun`      (Anchor-friendly; swap-in noted at end)
+//   Fallbacks (slower, integration only): solana-program-test/BanksClient (Rust) or
+//   `anchor test` against a local validator. Escalate only on a runtime-semantics wall; note why.
+//
+// SETUP
+//   1) Build target → target/deploy/<prog>.so  (anchor build / cargo build-sbf; MATCH pins §3).
+//   2) npm i litesvm @solana/web3.js bn.js   (+ @coral-xyz/anchor, @solana/spl-token if used)
+//   3) Fill the TODOs. Run with your test runner, e.g.  npx ts-mocha -p ./tsconfig.json this.ts
+//      (or vitest/jest). Print program logs on failure — they are your on-chain stack trace.
+//
+// NOTE: package APIs drift across versions (addProgramFromFile / sendTransaction / getAccount).
+// If a call doesn't resolve, check the installed package's types — don't paper over a mismatch.
+// ===========================================================================================
+
+import { LiteSVM } from "litesvm";
+import {
+  PublicKey,
+  Keypair,
+  Transaction,
+  TransactionInstruction,
+  SystemProgram,
+} from "@solana/web3.js";
+import { createHash } from "crypto";
+import BN from "bn.js";
+
+// TODO: the program id the `.so` was BUILT for (Anchor declare_id!). PDAs derive from it.
+const PROGRAM_ID = new PublicKey("Fill1nProgramIdMatching11111111111111111111");
+
+// Anchor global instruction discriminator = first 8 bytes of sha256("global:<ix_name>").
+// (Raw programs: use the target's own instruction tag layout instead.)
+function anchorDiscriminator(ixName: string): Buffer {
+  return createHash("sha256").update(`global:${ixName}`).digest().subarray(0, 8);
+}
+
+// Derive a PDA the way the program does — confirm seeds against the source `seeds = [...]`.
+function pda(seeds: (Buffer | Uint8Array)[]): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(seeds, PROGRAM_ID);
+}
+
+// Read a little-endian u64 field at `offset` (Anchor accounts: 8-byte discriminator, then borsh).
+function readU64(svm: LiteSVM, key: PublicKey, offset: number): bigint {
+  const acct = svm.getAccount(key);
+  if (!acct) throw new Error(`account missing: ${key.toBase58()}`);
+  return Buffer.from(acct.data).readBigUInt64LE(offset);
+}
+
+async function main() {
+  const svm = new LiteSVM();
+
+  // Load the compiled program at its declared id.
+  svm.addProgramFromFile(PROGRAM_ID, "target/deploy/PROGRAM.so");
+
+  // Fund a payer/attacker.
+  const attacker = new Keypair();
+  svm.airdrop(attacker.publicKey, BigInt(10_000_000_000)); // 10 SOL
+
+  // ---- honest setup: init config/vault PDA(s), create mint(s), fund an honest user's token
+  //      account with the funds the attacker will target. Prefer the program's OWN instructions
+  //      so the starting state is genuinely reachable. ----
+  // const [vaultPda] = pda([Buffer.from("vault")]);
+  // ... send init/deposit txs here ...
+
+  // ---- control baseline: state BEFORE the exploit tx ----
+  // const vaultBefore = readU64(svm, vaultPda, 8);
+  // const attackerBalBefore = /* spl token amount */ 0n;
+
+  // ---- build the ATTACKER instruction ----
+  const data = Buffer.concat([
+    anchorDiscriminator("withdraw"),
+    // new BN(amount).toArrayLike(Buffer, "le", 8),   // TODO borsh-encode args
+  ]);
+  const ix = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      // TODO EXACT account list, in order. Account-model bugs live here: pass the attacker as
+      // `authority` (missing signer/has_one/owner check?), a duplicate mutable account, a
+      // wrong-type look-alike (cosplay), or a user-supplied non-canonical-bump PDA.
+      { pubkey: attacker.publicKey, isSigner: true, isWritable: true },
+      // { pubkey: vaultPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+
+  const tx = new Transaction();
+  tx.add(ix);
+  tx.recentBlockhash = svm.latestBlockhash();
+  tx.feePayer = attacker.publicKey;
+  tx.sign(attacker);
+
+  const res = svm.sendTransaction(tx);
+
+  // ---- COVERAGE CANARY: prove the ix actually executed & reached the deep state ----
+  // LiteSVM returns a failed-tx object on error; treat a failure as "exploit path NOT reached".
+  if (typeof (res as any).err === "function" && (res as any).err()) {
+    console.error((res as any).meta?.().logs?.());
+    throw new Error(
+      "attacker tx reverted — exploit path NOT reached. Fix the PoC; do NOT record REFUTED off " +
+        "a tx that never ran the vulnerable code.",
+    );
+  }
+  // Optionally assert a log printed only inside the vulnerable branch:
+  // const logs = (res as any).logs?.() ?? [];
+  // if (!logs.some((l: string) => l.includes("withdraw: transferring")))
+  //   throw new Error("UNREACHED: vulnerable-branch log absent");
+
+  // ---- QUANTIFIED assertion: invariant broken (theft/lock demonstrated) ----
+  // const vaultAfter = readU64(svm, vaultPda, 8);
+  // const attackerBalAfter = /* spl token amount */ 0n;
+  // if (!(attackerBalAfter > attackerBalBefore)) throw new Error("no funds moved to attacker");
+  // if (vaultBefore - vaultAfter !== attackerBalAfter - attackerBalBefore)
+  //   throw new Error("conservation broken by an unexpected amount");
+  // >>> The assertion that FAILS on a patched program and PASSES here is the finding. <<<
+
+  console.log("PoC reached the attack state and demonstrated the break.");
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+
+// ===========================================================================================
+// bankrun swap-in (Anchor-friendly; use if the target ships an Anchor test suite you want to reuse)
+// ---
+//   import { start } from "solana-bankrun";
+//   const context = await start(
+//     [{ name: "program", programId: PROGRAM_ID }],   // loads target/deploy/program.so by name
+//     [],                                             // pre-seeded accounts
+//   );
+//   const client = context.banksClient;
+//   const payer = context.payer;
+//   // build the same ix; then:
+//   const tx = new Transaction().add(ix);
+//   tx.recentBlockhash = (await client.getLatestBlockhash())[0];
+//   tx.feePayer = payer.publicKey; tx.sign(payer);
+//   const meta = await client.processTransaction(tx);   // throws on failure = canary
+//   const acct = await client.getAccount(vaultPda);      // read state for the assertion
+//   // For Anchor programs, anchor-bankrun's BankrunProvider lets you call program.methods.*.
+// ===========================================================================================

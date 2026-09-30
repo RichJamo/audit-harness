@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+// ===========================================================================================
+// WHOLE-SYSTEM INVARIANT HANDLER TEMPLATE  (highest-recall artifact)
+// Deploy the ENTIRE protocol, register EVERY state-changing entry point as a fuzz action across
+// MULTIPLE entities (products/markets/positions) and MULTIPLE actors, then assert system-wide
+// properties: conservation, SOLVENCY (every owed party is always backed), no-overpay.
+// This surfaces bugs you never hypothesized — especially in the seams between contracts.
+// Copy to test/invariant/<Protocol>SystemHandler.sol and fill the TODOs.
+// ===========================================================================================
+
+import {Test} from "forge-std/Test.sol";
+// TODO import the full deploy helper, entry-point interface, token mock, position/NFT type.
+
+contract SystemHandler is Test {
+    // IProtocol public immutable protocol;  MockToken public immutable token;  address public immutable admin;
+    address public immutable admin;
+
+    uint256[] public entities;            // productIds / marketIds / positionIds in play
+    address[] public actors;              // unprivileged users
+    mapping(uint256 => uint256[]) public tokensOf; // positions per entity
+
+    // ---- Per-entity ghost accounting (lets you attribute cross-entity drains) ----
+    mapping(uint256 => uint256) public fundedIn;  // value credited to the entity (deposit/invest)
+    mapping(uint256 => uint256) public paidOut;   // value paid to users for the entity
+    uint256 public withdrawnToSink;               // value to a privileged sink (treasury) — not a user payout
+
+    // ---- Coverage counters (prove deep states reached; see the canary in the test) ----
+    uint256 public covFund; uint256 public covDistribute; uint256 public covRedeem; uint256 public covClaim;
+
+    constructor(/* IProtocol _p, MockToken _t, */ address _admin, uint256[] memory _entities) {
+        admin = _admin;
+        for (uint256 i = 0; i < _entities.length; i++) entities.push(_entities[i]);
+        for (uint256 i = 0; i < 5; i++) {
+            address a = makeAddr(string(abi.encodePacked("u", vm.toString(i))));
+            actors.push(a);
+            // TODO: vm.prank(a); token.approve(address(protocol), type(uint256).max);  // mind USDT 0->max-only
+        }
+        // TODO: vm.prank(admin); token.approve(address(protocol), type(uint256).max);
+    }
+
+    function _entity(uint256 s) internal view returns (uint256) { return entities[s % entities.length]; }
+    function _proxyBal() internal view returns (uint256) { /* TODO token.balanceOf(address(protocol)); */ return 0; }
+
+    // Each action: pick an entity, guard, prank the right actor, try/catch, measure balance delta.
+    function doFund(uint256 eSeed, uint256 aSeed, uint256 amtSeed) external {
+        // bound amount; mint to actor; vm.prank(actor); try invest/deposit { fundedIn[e]+=amt; covFund++; tokensOf[e].push(id);} catch {}
+    }
+    function doDistribute(uint256 eSeed) external {
+        uint256 e=_entity(eSeed); uint256 b=_proxyBal();
+        // vm.prank(admin); try protocol.distribute(e) {} catch {}
+        uint256 a=_proxyBal(); if (b>a){paidOut[e]+=b-a; covDistribute++;}
+    }
+    function doRedeem(uint256 eSeed) external {
+        uint256 e=_entity(eSeed); uint256 b=_proxyBal();
+        // vm.prank(admin); try protocol.mature/redeem(e) {} catch {}
+        uint256 a=_proxyBal(); if (b>a){paidOut[e]+=b-a; covRedeem++;}
+    }
+    function doClaim(uint256 eSeed, uint256 tSeed) external {
+        uint256 e=_entity(eSeed); uint256 b=_proxyBal();
+        // pick token, owner=ownerOf (try/catch burned); vm.prank(owner); try protocol.claim(e,tok) {} catch {}
+        uint256 a=_proxyBal(); if (b>a){paidOut[e]+=b-a; covClaim++;}
+    }
+    function doWithdraw(uint256 eSeed) external {
+        uint256 b=_proxyBal();
+        // vm.prank(admin); try protocol.withdraw(...) {} catch {}
+        uint256 a=_proxyBal(); withdrawnToSink += b-a;
+    }
+    function doTransfer(uint256 eSeed, uint256 tSeed, uint256 toSeed) external { /* move a position between actors */ }
+    function doToggleAdversary(uint256 aSeed, bool on) external { /* token.setBlocked(actor,on) to force escrow paths */ }
+    function doWarp(uint256 t) external { vm.warp(block.timestamp + bound(t, 1 hours, 45 days)); }
+
+    function totalEscrow(uint256 e) external view returns (uint256) { /* TODO Σ unclaimedYield + unclaimedPrincipal for e */ return 0; }
+}

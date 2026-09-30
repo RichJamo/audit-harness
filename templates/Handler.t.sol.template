@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+// ===========================================================================================
+// INVARIANT FUZZING HANDLER TEMPLATE
+// Copy to test/invariant/<Protocol>Handler.sol and fill the TODOs.
+// Pattern: closed-system ghost accounting (fundedIn / paidOut via balance deltas) so that any
+// double-pay / over-pay / rounding-drain surfaces as a broken invariant. All actions are
+// guarded + try/catch so a revert never aborts the run; the invariants do the checking.
+// ===========================================================================================
+
+import {Test} from "forge-std/Test.sol";
+// TODO: import the protocol entry-point interface, the token mock, and any NFT/position type.
+// import {IProtocol} from "...";
+// import {MockToken} from "...";
+
+contract Handler is Test {
+    // TODO: protocol handles
+    // IProtocol public immutable protocol;
+    // MockToken    public immutable token;
+    address public immutable admin;
+
+    address[] public actors;
+    uint256[] public positions; // e.g. tokenIds / receipt ids minted so far
+
+    // ---- Ghost accounting (the heart of the harness) ----
+    uint256 public ghostFundedIn;   // value that entered the protocol (deposits/invests)
+    uint256 public ghostPaidOut;    // value that left the protocol to users (claims/distributions/redemptions)
+    uint256 public ghostWithdrawn;  // value that left to a privileged sink (e.g. treasury) — NOT a user payout
+
+    // ---- Coverage counters (prove the fuzzer reached deep states; see canary in the test) ----
+    uint256 public covFund;
+    uint256 public covDistribute;
+    uint256 public covRedeem;
+    uint256 public covClaim;
+
+    constructor(/* IProtocol _protocol, MockToken _token, */ address _admin) {
+        // protocol = _protocol; token = _token;
+        admin = _admin;
+        for (uint256 i = 0; i < 5; i++) {
+            address a = makeAddr(string(abi.encodePacked("actor", vm.toString(i))));
+            actors.push(a);
+            // TODO: pre-approve the protocol with max allowance (mind USDT-style 0->max-only approve)
+            // vm.prank(a); token.approve(address(protocol), type(uint256).max);
+        }
+        // vm.prank(admin); token.approve(address(protocol), type(uint256).max);
+    }
+
+    function _proxyBal() internal view returns (uint256) {
+        // TODO: return token.balanceOf(address(protocol));
+        return 0;
+    }
+
+    // ---- Actions: each guarded, each measures balance delta around the protocol call ----
+
+    function doFund(uint256 actorSeed, uint256 amtSeed) external {
+        // TODO: bound amount; mint to actor; prank; try protocol.invest/deposit { ghostFundedIn += amt; covFund++; positions.push(id); } catch {}
+    }
+
+    function doDistribute(uint256 seed) external {
+        uint256 b = _proxyBal();
+        // vm.prank(admin); try protocol.distribute(...) {} catch {}
+        uint256 a = _proxyBal();
+        if (b > a) { ghostPaidOut += (b - a); covDistribute++; }
+    }
+
+    function doRedeem(uint256 seed) external {
+        uint256 b = _proxyBal();
+        // vm.prank(admin); try protocol.mature/redeem(...) {} catch {}
+        uint256 a = _proxyBal();
+        if (b > a) { ghostPaidOut += (b - a); covRedeem++; }
+    }
+
+    function doClaim(uint256 posSeed) external {
+        // pick a position, owner = ownerOf(pos) (try/catch burned), measure delta around the claim
+        uint256 b = _proxyBal();
+        // vm.prank(owner); try protocol.claim(...) {} catch {}
+        uint256 a = _proxyBal();
+        if (b > a) { ghostPaidOut += (b - a); covClaim++; }
+    }
+
+    function doWithdraw(uint256 seed) external {
+        uint256 b = _proxyBal();
+        // vm.prank(admin); try protocol.withdraw(...) {} catch {}
+        uint256 a = _proxyBal();
+        ghostWithdrawn += (b - a);
+    }
+
+    function doWarp(uint256 t) external { vm.warp(block.timestamp + bound(t, 1 hours, 45 days)); }
+
+    function doTransfer(uint256 posSeed, uint256 toSeed) external {
+        // move a position between actors (exercise bearer / entitlement-timing behaviour)
+    }
+
+    function doToggleAdversary(uint256 actorSeed, bool on) external {
+        // e.g. token.setBlocked(actor, on) to exercise the push-fail -> escrow path
+    }
+}

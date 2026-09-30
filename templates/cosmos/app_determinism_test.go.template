@@ -1,0 +1,120 @@
+// ===========================================================================================
+// COSMOS-SDK L1 EXPLOIT-PoC HARNESS — consensus-halt / nondeterminism   [the highest-value shape]
+// ---
+// WHY THIS EXISTS
+//   The dominant, highest-severity L1 critical is a CONSENSUS HALT — a nondeterministic state
+//   path (all nodes must compute the same AppHash) or an unrecovered panic in BeginBlock/EndBlock
+//   (every validator runs the identical block, so ONE panic halts the WHOLE chain). Neither has a
+//   static net (docs/cosmos-notes.md §4). This template proves them two ways:
+//     A) NONDETERMINISM: execute the suspect path TWICE and show the two runs produce different
+//        state bytes / AppHash. Divergence = the halt.  (checklist §1, PC §1)
+//     B) HALT-BY-PANIC: actually invoke BeginBlock/EndBlock (or an ante/keeper path) on
+//        attacker-planted state and show it PANICS.       (checklist §6/§4.2, PC §6)
+//
+// COVERAGE CANARY (strict for this class — the failure is silent until production)
+//   A) The suspect path MUST actually run on BOTH runs, and you compare REAL post-state bytes /
+//      AppHash, not a value the harness set. A single run, or comparing a harness counter, proves
+//      nothing.
+//   B) require.Panics MUST wrap the REAL BeginBlock/EndBlock call reaching the target — assert the
+//      panic comes from the target path (recover + inspect message/stack), not from the harness.
+//   A green determinism test that never executed the nondeterministic branch is a lie (repo rule).
+//
+// FIRST: does the app already ship TestAppStateDeterminism? If so, RUN IT — it fuzzes random msg
+//   sequences and asserts identical AppHash across repeated runs of the same seed
+//   (`make test-sim-nondeterminism`). It catches a class of §1 bugs for free. This template is for
+//   when you have a SPECIFIC suspect path the sim's random ops won't reliably hit, or the in-scope
+//   module isn't wired into the app's simapp.
+//
+// SETUP
+//   1) Match the target's go.mod (cosmos-sdk / cometbft). The app constructor + FinalizeBlock/
+//      Commit API differ across SDK v0.47 (BeginBlock/EndBlock/DeliverTx) vs v0.50+ (FinalizeBlock).
+//      Use the TARGET app's own test helper (`app.Setup`, `simapp.New…`) — do not reinvent wiring.
+//   2) Copy into the target's app/ package (or a package that can import the whole app).
+//   3) Run:  go test ./app -run 'TestPoC_(Nondeterminism|HaltByPanic)' -v
+// ===========================================================================================
+
+package app_test
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	// TODO: import the target app + its test setup, cometbft abci types, and sdk types, e.g.:
+	//   testapp "<module-path>/app"
+	//   abci "github.com/cometbft/cometbft/abci/types"
+	//   sdk "github.com/cosmos/cosmos-sdk/types"
+)
+
+// ------------------------------------------------------------------------------------------
+// A) NONDETERMINISM → HALT  (checklist §1, PC §1)
+// Run the SAME operations against TWO freshly-built apps from the SAME genesis/seed and compare the
+// resulting AppHash. If the suspect path (map-range-with-order-effect, float, time.Now, goroutine,
+// map-marshal) is nondeterministic, the two AppHashes differ — which in production is honest nodes
+// computing different state and consensus halting.
+// ------------------------------------------------------------------------------------------
+func TestPoC_Nondeterminism(t *testing.T) {
+	run := func() []byte {
+		// TODO: build a fresh app from a FIXED genesis (identical across both runs):
+		//   app := testapp.Setup(t, false)
+		//   ctx := app.NewContext(false)  // (v0.50+: NewContextLegacy / NewContext per version)
+		//
+		// Drive the EXACT suspect path deterministically — e.g. deliver the tx / call the keeper
+		// method that ranges the map, then run the blocker that materializes the order-sensitive
+		// effect. Do the identical sequence in both runs.
+		//   app.FinalizeBlock(&abci.RequestFinalizeBlock{Height: 1, ...})
+		//   res, _ := app.Commit()
+		//   return res.  // the AppHash Commit returns, OR read the specific state bytes the
+		//                // suspect path wrote (store.Get(key)) for a tighter signal.
+		return nil // TODO
+	}
+
+	// CANARY: both runs must have actually EXECUTED the suspect path. If your `run` short-circuits
+	// (skips the tx, the blocker never fires), you are comparing empty hashes and proving nothing.
+	// Assert the path ran (e.g. the effect key exists) before trusting the comparison.
+	h1 := run()
+	h2 := run()
+	require.NotEmpty(t, h1, "run 1 produced no state — the suspect path never executed (canary failed)")
+
+	// THE FINDING: on a deterministic chain h1 == h2 across identical inputs. Divergence == halt.
+	// (Run `run()` more than twice if the nondeterminism is probabilistic — e.g. a small map where
+	//  iteration order collides often; loop N times and assert all-equal, else it's flaky-negative.)
+	require.Equal(t, h1, h2,
+		"NONDETERMINISM: identical inputs produced different state on two runs — honest validators "+
+			"would compute different AppHashes here and consensus would HALT/fork. This assertion "+
+			"FAILING is the finding.")
+}
+
+// ------------------------------------------------------------------------------------------
+// B) HALT BY PANIC in a blocker  (checklist §6/§4.2, PC §6)  — lowest-effort L1 critical
+// Plant attacker-influenceable state via a message, then invoke the REAL BeginBlock/EndBlock and
+// show it panics. In production that panic halts every validator at that height (unrecoverable
+// without a coordinated upgrade).
+// ------------------------------------------------------------------------------------------
+func TestPoC_HaltByPanic(t *testing.T) {
+	// TODO: app := testapp.Setup(t, false); ctx := app.NewContext(false)
+
+	// 1) PLANT: deliver the attacker tx that writes the state which will make the blocker panic
+	//    (a queued item with a bad field, a count that will underflow, a math.Int that will
+	//    overflow/go-negative, an entry that makes an unguarded deref nil). checklist §6.2.
+	// _, err := deliverAttackerMsg(ctx, app)   // must SUCCEED to plant the state
+	// require.NoError(t, err, "plant tx failed — the halt state was never written (canary)")
+
+	// 2) TRIGGER: call the REAL blocker and assert it panics. require.Panics MUST wrap the actual
+	//    module/app BeginBlock or EndBlock reaching the target code — not a stand-in.
+	require.Panics(t, func() {
+		// module.EndBlock(ctx)          // the in-scope module's blocker, OR
+		// app.FinalizeBlock(&abci.RequestFinalizeBlock{Height: ctx.BlockHeight() + 1})
+	}, "EndBlock did NOT panic — the halt hypothesis is REFUTED for this input (record it)")
+
+	// 3) CANARY (attribution): confirm the panic originated in the TARGET path, not the harness.
+	//    Re-run inside a recover and assert the panic value/stack names the in-scope function, so a
+	//    self-inflicted harness panic can't masquerade as a chain halt.
+	//   func() {
+	//     defer func() {
+	//       r := recover()
+	//       require.NotNil(t, r, "no panic to attribute")
+	//       require.Contains(t, stackOf(r), "x/mymodule", "panic not from the in-scope module")
+	//     }()
+	//     module.EndBlock(ctx)
+	//   }()
+}

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# ===========================================================================================
+# COSMOS-SDK L1 EXPLOIT-PoC HARNESS — single-node localnet repro   [the ESCALATION, slowest]
+# ---
+# WHY THIS EXISTS
+#   The in-process harnesses (keeper_test / app_determinism_test) prove almost everything and run in
+#   milliseconds — use them FIRST. Reach for a real running node ONLY when:
+#     - you hit a runtime-semantics wall the in-process app can't model (real CometBFT consensus,
+#       mempool/CheckedTx admission, P2P, the actual node binary's ante wiring), OR
+#     - you want a VALIDATOR-OBSERVABLE halt for the report (the node process actually stops
+#       producing blocks / panics in its log — the most convincing evidence of an L1 halt).
+#   Record in the ledger row WHY you escalated (repo rule).
+#
+# WHAT THIS PROVES
+#   A single-node chain producing blocks, then the attacker action, then the node HALTS (block
+#   height stops advancing / the process panics). The coverage canary here is concrete: capture the
+#   pre-attack height advancing, the attack tx landing (or the crafted-block being processed), and
+#   the post-attack height FROZEN + the panic in the node log. A node that never advanced blocks in
+#   the first place proves nothing — assert it was live before the attack.
+#
+# NOT COMMITTED / LOCAL-FIRST: run this inside ~/engagements/<target>/, never in the toolkit repo.
+# Target code and any chain state stay OUTSIDE ~/audit-toolkit (repo guardrail).
+# ===========================================================================================
+set -uo pipefail
+
+# ---- config (fill per target) --------------------------------------------------------------
+BIN="${BIN:-simd}"                    # TODO the node binary name (from the target Makefile)
+CHAIN_ID="${CHAIN_ID:-localnet-1}"
+HOME_DIR="${HOME_DIR:-$(mktemp -d)/.node}"   # ephemeral; NOT under the toolkit
+DENOM="${DENOM:-stake}"               # TODO the staking/fee denom
+KEY="${KEY:-validator}"
+
+command -v "$BIN" >/dev/null 2>&1 || { echo "FATAL: $BIN not on PATH — 'make install' the target node first"; exit 1; }
+
+echo "== init single-node localnet in $HOME_DIR =="
+"$BIN" init poc --chain-id "$CHAIN_ID" --home "$HOME_DIR" >/dev/null 2>&1
+
+# TODO: create a validator key, add genesis account + gentx, collect-gentxs. The exact subcommands
+# vary by target/SDK version — mirror the target's own `scripts/localnet.sh` / `Makefile` if it ships
+# one (most chains do; reuse it rather than reinventing genesis wiring).
+#   "$BIN" keys add "$KEY" --keyring-backend test --home "$HOME_DIR"
+#   "$BIN" genesis add-genesis-account "$KEY" 100000000000$DENOM --keyring-backend test --home "$HOME_DIR"
+#   "$BIN" genesis gentx "$KEY" 1000000000$DENOM --chain-id "$CHAIN_ID" --keyring-backend test --home "$HOME_DIR"
+#   "$BIN" genesis collect-gentxs --home "$HOME_DIR"
+
+echo "== start node =="
+"$BIN" start --home "$HOME_DIR" >"$HOME_DIR/node.log" 2>&1 &
+NODE_PID=$!
+trap 'kill "$NODE_PID" 2>/dev/null' EXIT
+
+# ---- CANARY 1: prove the chain is LIVE before the attack (blocks advancing) ----------------
+# Poll the RPC status until height advances past 2, or fail (a chain that never produced blocks
+# can't demonstrate a halt).
+live_height() { "$BIN" status --home "$HOME_DIR" 2>/dev/null | sed -n 's/.*"latest_block_height":"\([0-9]*\)".*/\1/p'; }
+for _ in $(seq 1 30); do
+  h="$(live_height)"; [ -n "${h:-}" ] && [ "${h:-0}" -ge 2 ] && break
+  sleep 1
+done
+H_BEFORE="$(live_height)"
+[ -n "${H_BEFORE:-}" ] && [ "${H_BEFORE:-0}" -ge 2 ] || { echo "CANARY FAIL: node never advanced blocks — cannot prove a halt"; exit 1; }
+echo "chain live at height $H_BEFORE"
+
+# ---- the ATTACK ----------------------------------------------------------------------------
+# TODO: broadcast the attacker tx (or submit the crafted message) that triggers the halt hypothesis
+# — the tx that plants the state a blocker will panic on, the unbounded-loop trigger, the
+# nondeterminism/forge path. Use `"$BIN" tx ... --from attacker --keyring-backend test -y`.
+echo "== broadcasting attack =="
+# "$BIN" tx <module> <attack-msg> ... --from "$KEY" --chain-id "$CHAIN_ID" --keyring-backend test -y --home "$HOME_DIR"
+
+# ---- CANARY 2: prove the chain HALTED after the attack (height frozen / process panicked) ---
+sleep 8
+H_AFTER="$(live_height)"
+echo "height before attack: $H_BEFORE   after: ${H_AFTER:-<node down>}"
+if ! kill -0 "$NODE_PID" 2>/dev/null; then
+  echo ">>> FINDING: node PROCESS DIED (panic). Halt proven. Panic tail:"
+  tail -n 30 "$HOME_DIR/node.log"
+elif [ -n "${H_AFTER:-}" ] && [ "${H_AFTER}" -le "${H_BEFORE}" ]; then
+  echo ">>> FINDING: block height FROZEN at $H_AFTER (was advancing) — chain can no longer finalize. Log tail:"
+  tail -n 30 "$HOME_DIR/node.log"
+else
+  echo "chain still advancing (height ${H_AFTER}) — halt hypothesis REFUTED for this input; record it."
+fi

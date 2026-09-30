@@ -1,0 +1,21 @@
+# Correctness rules ONLY. Read this before widening it.
+#
+# Why ruff is here at all: an undefined name (`msgs` in ledger_state_guard.py) crashed the
+# Stop hook from the day G12 shipped until 2026-09-10. The file compiled, the tests passed,
+# and the hook died on any engagement holding a matching row -- which, from the outside,
+# looks exactly like a clean pass. F821 finds it without running anything.
+#
+# Why the ruleset is this narrow: ruff 0.16's default selection reports 193 findings across
+# tooling/ and bench/, almost all of them style. A check that fires that often gets switched
+# off within a day (CLAUDE.md, "Default to exit 0 and silence"), and these four rules would be
+# switched off with it. They report 0 today. Add a rule only if it finds bugs, never
+# preferences.
+extend-exclude = ["vendor"]
+
+[lint]
+select = [
+  "F821",  # undefined name -- the Stop-hook crash
+  "F811",  # redefinition of an unused name: the first definition is dead code
+  "F822",  # undefined name in __all__
+  "E9",    # the file cannot be parsed or read
+]
