@@ -380,13 +380,13 @@ class TestHookWiring(unittest.TestCase):
 
     BENIGN = '{"tool_name":"Write","tool_input":{"file_path":"/tmp/not-a-ledger.txt","content":"x"}}'
 
-    def hook_command(self):
+    def hook_command(self, event="PreToolUse"):
         import yaml
         raw = (Path(__file__).parents[2] / "skill" / "SKILL.md").read_text().split("---\n")[1]
         fm = yaml.safe_load(raw)
-        return fm["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        return fm["hooks"][event][0]["hooks"][0]["command"]
 
-    def run_hook(self, payload, env=None):
+    def run_hook(self, payload, env=None, event="PreToolUse"):
         """Run the literal frontmatter command.
 
         HOME defaults to the checkout's PARENT because the command resolves the guard as
@@ -408,18 +408,52 @@ class TestHookWiring(unittest.TestCase):
         link = home / "audit-toolkit"
         if not link.exists():
             link.symlink_to(TOOLKIT_ROOT)
-        return subprocess.run(["sh", "-c", self.hook_command()], input=payload, text=True,
-                              capture_output=True,
-                              env={**os.environ, "HOME": str(home), **(env or {})})
+        full_env = {**os.environ, "HOME": str(home)}
+        if event == "Stop":
+            # Keep the state guard's engagement scan off the real filesystem: it scans
+            # AUDIT_ENGAGEMENT_ROOT (or the cwd) for ledgers regardless of the payload,
+            # unlike the PreToolUse guard which only looks at tool_input.
+            full_env["AUDIT_ENGAGEMENT_ROOT"] = str(Path(tempfile.mkdtemp()))
+        full_env.update(env or {})
+        return subprocess.run(["sh", "-c", self.hook_command(event)], input=payload, text=True,
+                              capture_output=True, env=full_env)
 
     def test_the_command_resolves_relative_to_HOME(self):
         """Pins the assumption the two tests below rely on, so a breach names itself."""
-        self.assertIn("$HOME/audit-toolkit/", self.hook_command())
+        self.assertIn("${AUDIT_HARNESS_HOME:-$HOME/audit-toolkit}/", self.hook_command())
         # Deliberately NOT asserting TOOLKIT_ROOT.name == "audit-toolkit". That coupled the
         # suite to one directory name and produced three failures in every worktree, which is
         # indistinguishable from real breakage. run_hook() supplies the path instead.
         self.assertTrue((TOOLKIT_ROOT / "tooling/guards/ledger_guard.py").is_file(),
                         "the guard must exist wherever this checkout lives")
+
+    def test_AUDIT_HARNESS_HOME_resolves_both_hooks(self):
+        """Both hooks honour AUDIT_HARNESS_HOME, falling back to $HOME/audit-toolkit when it
+        is unset. The missing-directory case must fail CLOSED on PreToolUse (exit 2, every
+        Write/Edit blocked) and fail OPEN on Stop (exit 0 -- a Stop hook that fails closed
+        would trap the session), and each must name the path it could not find."""
+        import tempfile
+        temp_checkout = Path(tempfile.mkdtemp()) / "checkout"
+        temp_checkout.symlink_to(TOOLKIT_ROOT)
+        missing = str(Path(tempfile.mkdtemp()) / "does-not-exist")
+
+        cases = [
+            ("PreToolUse", {}, 0, None),
+            ("PreToolUse", {"AUDIT_HARNESS_HOME": str(temp_checkout)}, 0, None),
+            ("PreToolUse", {"AUDIT_HARNESS_HOME": missing}, 2, missing),
+            ("Stop", {}, 0, None),
+            ("Stop", {"AUDIT_HARNESS_HOME": str(temp_checkout)}, 0, None),
+            ("Stop", {"AUDIT_HARNESS_HOME": missing}, 0, missing),
+        ]
+        for event, env, want_rc, want_missing_path in cases:
+            with self.subTest(event=event, home_override=env.get("AUDIT_HARNESS_HOME", "<unset>")):
+                r = self.run_hook(self.BENIGN, env=env, event=event)
+                self.assertEqual(r.returncode, want_rc, r.stderr)
+                if want_missing_path is not None:
+                    self.assertIn(want_missing_path, r.stderr)
+                    self.assertIn("MISCONFIGURED", r.stderr)
+                else:
+                    self.assertEqual(r.stderr, "", "a resolved hook must be silent on a non-ledger write")
 
     def test_resolves_and_stays_silent_on_an_unrelated_write(self):
         r = self.run_hook(self.BENIGN)
