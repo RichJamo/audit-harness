@@ -42,40 +42,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install pyyaml
-        # ledger_guard G1 reads the DEDUP sidecar. Without pyyaml it FAILS CLOSED by design,
-        # so a missing dependency here would look like a guard bug rather than a setup error.
+        # ledger_guard G1 fails closed without pyyaml, so a missing dependency here would look like a guard bug.
         run: python -m pip install --quiet --disable-pip-version-check pyyaml
 
-      - name: Guard tests
-        run: |
-          python -m unittest \
-            tooling.guards.test_ledger_guard \
-            tooling.guards.test_ledger_state_guard -v
-
-      - name: Prior-art extractor tests
-        # NOT in the unittest list above, deliberately. This file is pytest-style -- five
-        # bare `def test_*` functions, no TestCase -- so `python -m unittest` collects ZERO
-        # of them and reports OK, and pytest is not installed on this toolchain. It carries
-        # its own __main__ runner for that reason; this step is the thing that calls it.
-        # It was on disk and unrun by CI from the day it shipped (found 2026-09-15).
-        run: python tooling/guards/test_extract_prior_art.py
-
-      - name: Ledger CLI -- golden AND poisoned fixtures
-        # The poisoned cases are the point: a CLI that ACCEPTS a malformed promotion
-        # fails the build. A suite that only feeds itself valid input is the "green
-        # suite that never ran the code under test" the guards handover warns about.
-        run: python -m unittest tooling.ledger.test_ledger_cli -v
-
-      - name: Other tooling tests
-        # This list is EXPLICIT, so a new test file runs only when someone adds it here --
-        # and on 2026-09-15 three were found that nobody had. If you add a test module, add
-        # it here in the same commit. The list is trimmed to the modules this release ships;
-        # the private toolkit's list is longer.
-        run: |
-          python -m unittest \
-            tooling.test_bootstrap \
-            tooling.test_engagement_doctor \
-            tooling.test_install_hooks -v
+      - name: All tooling tests
+        # One discover command collects every test under tooling/, guards included, so none can go uncollected.
+        run: python -m unittest discover -s tooling -p "test_*.py" -v
 
   scaffold:
     # End-to-end: the scaffold must produce a ledger the guards can read AND actually guard.
