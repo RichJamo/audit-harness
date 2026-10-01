@@ -53,14 +53,21 @@ real findings. The gates sit on status *transitions* only.
 
 ## Installing it
 
-The hooks resolve their scripts by absolute path, under `$HOME/audit-toolkit/`. That is on purpose:
-the documented alternative resolves to wherever the session happened to start, which during a real
-audit is the target's directory, and a hook that silently expands to the wrong path fails in a way
-that looks exactly like enforcement.
+The hooks resolve their scripts by absolute path, under `${AUDIT_HARNESS_HOME:-$HOME/audit-toolkit}`.
+That is on purpose: the documented alternative resolves to wherever the session happened to start,
+which during a real audit is the target's directory, and a hook that silently expands to the wrong
+path fails in a way that looks exactly like enforcement.
+
+Clone it into `~/audit-toolkit` and set nothing, or clone it anywhere else and point
+`AUDIT_HARNESS_HOME` there:
 
 ```sh
-git clone <this repo> ~/audit-toolkit     # or edit the two command: lines in skill/SKILL.md
-cd ~/audit-toolkit
+git clone <this repo> ~/audit-toolkit     # the default; nothing else to set
+# -- or, cloned anywhere else --
+git clone <this repo> <wherever you put it>
+export AUDIT_HARNESS_HOME=<wherever you put it>   # add this line to your shell profile
+
+cd "${AUDIT_HARNESS_HOME:-$HOME/audit-toolkit}"
 tooling/bootstrap.sh                      # Slither, Aderyn, solc-select, pyyaml, ruff
 tooling/install-hooks.sh                  # merges the SessionStart hook into ~/.claude/settings.json
 tooling/install-hooks.sh --check          # report drift, change nothing

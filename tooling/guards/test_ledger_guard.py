@@ -1219,6 +1219,15 @@ class TestG11ChannelGuard(unittest.TestCase):
         self.assertIn("promote", errs[0])
         self.assertIn("render", errs[0])
 
+    def test_the_message_names_the_resolved_root_not_a_hard_coded_one(self):
+        """The CLI command this message tells the model to run must point at wherever this
+        checkout actually lives -- not a literal ~/audit-toolkit, which is wrong for anyone
+        running AUDIT_HARNESS_HOME pointed somewhere else."""
+        self.migrate()
+        errs = ledger_guard.evaluate(self.led, self.body.replace("UNTESTED", "CONFIRMED"))
+        self.assertIn(str(ledger_guard.TOOLKIT_ROOT), errs[0])
+        self.assertNotIn("~/audit-toolkit", errs[0])
+
     def test_the_cli_render_is_not_blocked_by_g11(self):
         """VERIFIED, NOT ASSUMED. The hook's main() only ever sees Write/Edit payloads
         (file_path + content/new_string). The CLI writes ledger.md from Python inside a
