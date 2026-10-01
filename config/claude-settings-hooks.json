@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "D=\"$HOME/audit-toolkit/tooling/engagement-doctor.py\"; [ -x \"$D\" ] && python3 \"$D\" --all --quiet || true",
+            "command": "D=\"${AUDIT_HARNESS_HOME:-$HOME/audit-toolkit}/tooling/engagement-doctor.py\"; [ -x \"$D\" ] && python3 \"$D\" --all --quiet || true",
             "timeout": 20
           }
         ]

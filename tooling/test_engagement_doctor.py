@@ -952,6 +952,33 @@ class RuntimeBranchCheck(unittest.TestCase):
         self.assertEqual(doctor.check_runtime_branch(d), [],
                          "detached HEAD is ambiguous -- mid-rebase is not a misconfiguration")
 
+    def test_RUNTIME_ROOT_honours_AUDIT_HARNESS_HOME(self):
+        """RUNTIME_ROOT is computed once at import, exactly like the hooks' own shell
+        expansion ${AUDIT_HARNESS_HOME:-$HOME/audit-toolkit} -- so this reloads the module
+        per case instead of mutating the already-imported constant."""
+        doctor_path = Path(__file__).resolve().parent / "engagement-doctor.py"
+
+        def load(env):
+            saved = os.environ.pop("AUDIT_HARNESS_HOME", None)
+            try:
+                os.environ.update(env)
+                spec = importlib.util.spec_from_file_location("engagement_doctor_envcheck", doctor_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+            finally:
+                os.environ.pop("AUDIT_HARNESS_HOME", None)
+                if saved is not None:
+                    os.environ["AUDIT_HARNESS_HOME"] = saved
+
+        cases = [
+            ({}, Path.home() / "audit-toolkit"),
+            ({"AUDIT_HARNESS_HOME": "/tmp/some-other-checkout"}, Path("/tmp/some-other-checkout")),
+        ]
+        for env, want in cases:
+            with self.subTest(env=env):
+                self.assertEqual(load(env).RUNTIME_ROOT, want)
+
 
 class TestGeneratorsUnrun(Base):
     """The check exists so `bench/PREREG-generator-conversion.md` can ever be evaluated: it
