@@ -408,7 +408,11 @@ class TestHookWiring(unittest.TestCase):
         link = home / "audit-toolkit"
         if not link.exists():
             link.symlink_to(TOOLKIT_ROOT)
-        full_env = {**os.environ, "HOME": str(home)}
+        # Exclude any AUDIT_HARNESS_HOME already exported in the ambient shell -- otherwise
+        # a case meaning "unset" would silently inherit it instead, which is exactly the
+        # shell most developers will have after following README's install instructions.
+        full_env = {k: v for k, v in os.environ.items() if k != "AUDIT_HARNESS_HOME"}
+        full_env["HOME"] = str(home)
         if event == "Stop":
             # Keep the state guard's engagement scan off the real filesystem: it scans
             # AUDIT_ENGAGEMENT_ROOT (or the cwd) for ledgers regardless of the payload,
