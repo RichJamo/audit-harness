@@ -6,12 +6,12 @@ hooks:
     - matcher: "Write|Edit"
       hooks:
         - type: command
-          command: 'G="$HOME/audit-toolkit/tooling/guards/ledger_guard.py"; [ -f "$G" ] || { echo "ledger guard MISCONFIGURED: cannot find $G. Failing closed, so every Write/Edit is blocked until the hook path in SKILL.md frontmatter is fixed. See docs/guard-register.md." >&2; exit 2; }; python3 "$G"'
+          command: 'G="${AUDIT_HARNESS_HOME:-$HOME/audit-toolkit}/tooling/guards/ledger_guard.py"; [ -f "$G" ] || { echo "ledger guard MISCONFIGURED: cannot find $G. Failing closed, so every Write/Edit is blocked until the hook path in SKILL.md frontmatter is fixed. See docs/guard-register.md." >&2; exit 2; }; python3 "$G"'
           timeout: 15
   Stop:
     - hooks:
         - type: command
-          command: 'G="$HOME/audit-toolkit/tooling/guards/ledger_state_guard.py"; [ -f "$G" ] || { echo "ledger STATE guard MISCONFIGURED: cannot find $G. Exiting 0 -- a Stop hook that fails closed cannot be routed around and would trap the session. The PreToolUse guard still fails closed. See docs/guard-register.md." >&2; exit 0; }; python3 "$G"'
+          command: 'G="${AUDIT_HARNESS_HOME:-$HOME/audit-toolkit}/tooling/guards/ledger_state_guard.py"; [ -f "$G" ] || { echo "ledger STATE guard MISCONFIGURED: cannot find $G. Exiting 0 -- a Stop hook that fails closed cannot be routed around and would trap the session. The PreToolUse guard still fails closed. See docs/guard-register.md." >&2; exit 0; }; python3 "$G"'
           timeout: 20
 ---
 

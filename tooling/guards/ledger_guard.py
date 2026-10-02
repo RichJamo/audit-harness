@@ -1147,11 +1147,12 @@ def check_g11(path: Path, eng: Path) -> list[str]:
     """
     if not (eng / "ledger" / "events.jsonl").exists():
         return []
+    cli = TOOLKIT_ROOT / "tooling" / "ledger" / "cli.py"
     return [f"G11 this engagement's ledger is CLI-managed -- `{path.name}` is a GENERATED "
             f"render, and editing it forks the state from ledger/events.jsonl.\n"
-            f"      Change state:  python3 ~/audit-toolkit/tooling/ledger/cli.py promote "
+            f"      Change state:  python3 {cli} promote "
             f"--id <ID> --to <STATUS> ...\n"
-            f"      Then:          python3 ~/audit-toolkit/tooling/ledger/cli.py render\n"
+            f"      Then:          python3 {cli} render\n"
             f"      Adding rows:   ... add --id <ID> --hypothesis \"...\"  (or `import <file>`)\n"
             f"      If this is a pre-migration ledger you are retiring, import it and "
             f"delete it -- do not keep two sources of truth."]

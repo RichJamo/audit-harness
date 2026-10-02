@@ -885,7 +885,7 @@ def status_line(results: list[tuple[str, str, str]]) -> str:
 # read as the work being absent and the wrong diagnosis ("the fix never landed")
 # was repeated for hours. Nothing errored. That is the definition of a silently
 # violated, state-decidable rule, which CLAUDE.md says earns a check.
-RUNTIME_ROOT = Path.home() / "audit-toolkit"
+RUNTIME_ROOT = Path(os.environ.get("AUDIT_HARNESS_HOME", str(Path.home() / "audit-toolkit")))
 
 
 def check_runtime_branch(root: Path = RUNTIME_ROOT) -> list[str]:
