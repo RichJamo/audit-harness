@@ -85,8 +85,6 @@ the script proves the result passes the guards rather than asserting it.
 
 ```sh
 python3 -m unittest discover -s tooling -p "test_*.py"
-python3 -m unittest discover -s tooling/guards -p "test_*.py"
-python3 tooling/guards/test_extract_prior_art.py   # pytest-style; unittest collects none of it
 ruff check tooling
 ```
 
