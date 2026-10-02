@@ -1,5 +1,8 @@
 # The Guard Register
 
+This file cites files this repository does not contain — `CLAUDE.md`, `docs/gates-checklist.md`
+and others. `docs/not-included.md` lists every one of them, with one line on what each is.
+
 **What this is.** The set of methodology rules that are enforced by machinery rather than by prose, the
 pass/fail criteria for each, and the measured failure that justifies it. Design principle and layer
 taxonomy live in `CLAUDE.md` §"Where a rule lives"; this file is the register itself.
