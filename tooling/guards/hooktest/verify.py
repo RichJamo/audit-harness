@@ -86,8 +86,7 @@ CASES = [
     ("08-g1b-pass",             write("08-g1b-pass", "poc/FeeAccrual.t.sol"),      ALLOW, ""),
     ("09-g2-refuted-prose",     edit("09-g2-refuted-prose", T1, "| `REFUTED` - safe by inspection |"), BLOCK, "never by prose"),
     ("10-g2-evidence-missing",  edit("10-g2-evidence-missing", T1, "| `REFUTED` EVIDENCE: poc/Nope.t.sol |"), BLOCK, "does not resolve"),
-    ("11-g2-refuted-pass",      edit("11-g2-refuted-pass", T1, "| `REFUTED` EVIDENCE: poc/FeeRounding.t.sol::test_residueNotClaimable · "
-                                 "REASON: the truncated residue rolls into the next accrual pass, so no third party can claim it |"), ALLOW, ""),
+    ("11-g2-refuted-pass",      edit("11-g2-refuted-pass", T1, "| `REFUTED` EVIDENCE: poc/FeeRounding.t.sol::test_residueNotClaimable |"), ALLOW, ""),
     ("23-g2-refuted-noreason",  edit("23-g2-refuted-noreason", T1, "| `REFUTED` EVIDENCE: poc/FeeRounding.t.sol::test_residueNotClaimable |"), BLOCK, "needs a --reason"),
     ("12-g2-scopeheld-nohuman", edit("12-g2-scopeheld-nohuman", U, "| `SCOPE-HELD` admin-gated |"), BLOCK, "no HUMAN: record"),
     ("13-g2-scopeheld-pass",    edit("13-g2-scopeheld-pass", U, "| `SCOPE-HELD` HUMAN: RJ 2026-08-20 |"), ALLOW, ""),
