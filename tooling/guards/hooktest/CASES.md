@@ -33,7 +33,8 @@ any wiring change, then use `verify.py` for the rest.
 | 08 | new `poc/` harness once a row is at `TIER-1` | ALLOW | ok |
 | 09 | →`REFUTED` with reasoning and no evidence | BLOCK | ok — **REF-6 failure mode** |
 | 10 | →`REFUTED` citing a path that does not exist | BLOCK | ok |
-| 11 | →`REFUTED` citing a real `.t.sol` and its test function | ALLOW | ok |
+| 11 | →`REFUTED` citing a real `.t.sol`, its test function, and a `REASON:` | ALLOW | ok |
+| 23 | →`REFUTED` citing the same evidence with no `REASON:` | BLOCK | ok — **REF-26, 2026-09-24** |
 | 12 | →`SCOPE-HELD` with no human record | BLOCK | ok |
 | 13 | →`SCOPE-HELD` with `HUMAN:` | ALLOW | ok |
 | 14 | a row deleted outright | BLOCK | ok |

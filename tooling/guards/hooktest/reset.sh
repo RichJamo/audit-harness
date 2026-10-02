@@ -87,6 +87,10 @@ mkdir -p "$CASES/11-g2-refuted-pass/00-triage" "$CASES/11-g2-refuted-pass/ledger
 { hdr "11 - G2 real evidence"; echo '| **HT-11** | rounding residue is claimable by a third party | `TIER-1` |'; } > "$CASES/11-g2-refuted-pass/ledger/ledger.md"
 printf '// exploit-should-work test\ncontract FeeRoundingTest { function test_residueNotClaimable() public {} }\n' > "$CASES/11-g2-refuted-pass/poc/FeeRounding.t.sol"
 
+mkdir -p "$CASES/23-g2-refuted-noreason/00-triage" "$CASES/23-g2-refuted-noreason/ledger" "$CASES/23-g2-refuted-noreason/poc"
+{ hdr "23 - G2 real evidence, no REASON"; echo '| **HT-23** | rounding residue is claimable by a third party | `TIER-1` |'; } > "$CASES/23-g2-refuted-noreason/ledger/ledger.md"
+printf '// exploit-should-work test\ncontract FeeRoundingTest { function test_residueNotClaimable() public {} }\n' > "$CASES/23-g2-refuted-noreason/poc/FeeRounding.t.sol"
+
 mkdir -p "$CASES/12-g2-scopeheld-nohuman/00-triage" "$CASES/12-g2-scopeheld-nohuman/ledger"
 { hdr "12 - G2 scope-held, model decided"; echo '| **HT-12** | admin can brick the withdrawal queue | `UNTESTED` |'; } > "$CASES/12-g2-scopeheld-nohuman/ledger/ledger.md"
 
