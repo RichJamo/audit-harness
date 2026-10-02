@@ -129,3 +129,12 @@ jobs:
           assert any("skips TIER-1" in e for e in errs), f"guard did not fire: {errs}"
           print("scaffold is parsed, rooted, and guarded")
           PY
+
+      - name: Live hook-test suite (drives the guards through their real stdin contract)
+        # Unlike the unit tests above, this calls the shipped guard scripts over the real
+        # stdin contract Claude Code uses -- it is the only thing that proves the wiring,
+        # not just the rule logic. Was run only by hand until this step; a rule change that
+        # broke it (REF-26, 2026-09-24) sat unnoticed on main because of that.
+        run: |
+          cd tooling/guards/hooktest
+          ./reset.sh && python3 verify.py
