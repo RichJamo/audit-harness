@@ -1,20 +1,14 @@
 # Audit enforcement harness
 
+[![tests](https://github.com/RichJamo/audit-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/RichJamo/audit-harness/actions/workflows/tests.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+[![python: 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#running-the-tests)
+
 This is the machinery that makes two rules of a smart-contract audit method hold whether or not
 the person — or the model — doing the audit chooses to follow them. It is a ledger command line
-tool, two Claude Code hooks, a setup doctor and a scaffold. It ships under the MIT licence.
-
-**The hunting workflow is deliberately not included.** The method this harness belongs to also has
-a core that tells a hunter where to look: the hunter prompts, the phase instructions, the pattern
-catalogues and the coverage checklists. None of that is here. Competitive audit payouts fall
-steeply with the number of people who find the same bug, so that half stays private. What you get
-is the part that is worth sharing: the discipline, not the leads.
-
-Because of that, files here sometimes point at documents this repository does not contain — phase
-files, pattern catalogues, measurement notes under `bench/`. Those references are left exactly as
-they are rather than edited away, so it is visible where the private half used to be. In the same
-way, the doctor may suggest running hypothesis generators (a refutation critic, an opposite-tail
-detector, a fix-adjacency scanner): those are hunting tools and are not part of this release.
+tool, two Claude Code hooks, a setup doctor and a scaffold. Both rules held only in prose for most
+of this project's life, and `docs/guard-register.md` records that one of them — "no argument-kills"
+— was broken by 7 of 11 parked rows on one audit.
 
 ## The two rules
 
@@ -30,10 +24,59 @@ Both rules were written in prose for a long time, in bold, in two places, and bo
 repeatedly and silently. Nothing errored when a row was argued away, so nothing corrected it. That
 is what this harness is for: the rules are now preconditions of the operation rather than advice.
 
+## See it refuse
+
+The CI `scaffold` job in `.github/workflows/tests.yml` runs this on every push: it writes a
+hypothesis, tries an illegal jump from `UNTESTED` straight to `CONFIRMED`, and asserts the guard
+refuses it. Here is the same thing run by hand, commands and output both pasted from a real run:
+
+```sh
+$ ./tooling/new-engagement.sh audit /tmp/demo
+scaffolded /tmp/demo/audit
+  [... the rest of the scaffolded layout, cut here — see tooling/new-engagement.sh ...]
+guard self-check: clean
+
+$ printf '| H1 | fee rounds down |  |  | UNTESTED |  |  |\n' >> /tmp/demo/audit/ledger/ledger.md
+
+$ echo '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/demo/audit/ledger/ledger.md","old_string":"| H1 | fee rounds down |  |  | UNTESTED |  |  |","new_string":"| H1 | fee rounds down |  |  | CONFIRMED |  |  |"}}' \
+  | python3 tooling/guards/ledger_guard.py
+BLOCKED by ledger guard (docs/guard-register.md):
+  - G1 [H1] UNTESTED -> CONFIRMED skips TIER-1. Reaching CONFIRMED implies harness work, and the dedup obligation is owed BEFORE that spend, not after. Promote to TIER-1 with a DEDUP: sidecar first.
+  - G10 [H1] CONFIRMED with no PoC artifact named anywhere on the row. A finding is claimed with a PoC, never with prose. No PoC means no submission -- and on a platform where the PoC field is optional, this guard is the only thing enforcing that. Write `EVIDENCE: <path>` on the row.
+
+$ echo $?
+2
+```
+
+The JSON on stdin is the same shape Claude Code sends a `PreToolUse` hook for a real `Edit` tool
+call, so this is the hook itself refusing the write, not a stand-in for it.
+
 ## The three layers that enforce them, plus the doctor
 
 Every audit hypothesis lives as one row in a ledger, and every decision about it is a change of
 that row's status. All four pieces below work on that one artefact.
+
+```mermaid
+flowchart TD
+    S["session start"] --> D["engagement-doctor.py<br/>REPORTS the setup gaps the guards care about — never blocks"]
+
+    W["a write to the ledger"] --> C{"written through the<br/>ledger CLI?"}
+    C -- "yes: tooling/ledger/" --> CLI["BLOCKS by construction —<br/>validation and mutation are one operation,<br/>so an invalid write makes no state change"]
+    C -- "no: Write/Edit tool" --> PRE{"ledger_guard.py<br/>PreToolUse hook"}
+    PRE -- "invalid transition" --> BLOCKED["BLOCKS, exit 2 — fails closed"]
+    PRE -- "valid" --> FILE
+    CLI --> FILE[("ledger/events.jsonl<br/>+ generated ledger.md")]
+    C -- "no: raw Bash — sed, tee, a heredoc" --> FILE
+
+    FILE --> STOP{"ledger_state_guard.py<br/>Stop hook, end of turn"}
+    STOP -- "state still invalid" --> REFUSED["BLOCKS the turn, exit 2 —<br/>detective, fails open, yields after 3 blocks/session"]
+    STOP -- "state clean" --> END["turn ends — silent"]
+```
+
+The `PreToolUse` hook only ever sees a `Write` or `Edit` tool call, so raw Bash — `sed`, `tee`, a
+heredoc — walks straight past it; the `Stop` hook is what catches that, from the file's state
+rather than the tool call. The ledger CLI's preconditions are stronger still: an invalid mutation
+never reaches disk at all, so there is nothing for either hook to refuse.
 
 | | what it is | how binding it is |
 |---|---|---|
@@ -50,6 +93,23 @@ One deliberate design constraint runs through all of it: **row creation is never
 hunting phases generate wide and suppress nothing, so every row starts life untested. A gate
 demanding justification before a hypothesis may be written down would throttle the search and cost
 real findings. The gates sit on status *transitions* only.
+
+## What is not here
+
+**The hunting workflow is deliberately not included.** The method this harness belongs to also has
+a core that tells a hunter where to look: the hunter prompts, the phase instructions, the pattern
+catalogues and the coverage checklists. None of that is here. Competitive audit payouts fall
+steeply with the number of people who find the same bug, so that half stays private. What you get
+is the part that is worth sharing: the discipline, not the leads.
+
+Because of that, files here sometimes point at documents this repository does not contain — phase
+files, pattern catalogues, measurement notes under `bench/`. Those references are left exactly as
+they are rather than edited away, so it is visible where the private half used to be. In the same
+way, the doctor may suggest running hypothesis generators (a refutation critic, an opposite-tail
+detector, a fix-adjacency scanner): those are hunting tools and are not part of this release.
+
+`docs/not-included.md` lists every one of those missing files by name, with one line on what each
+is.
 
 ## Installing it
 
