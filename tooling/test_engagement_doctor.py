@@ -254,6 +254,32 @@ class TestBundledAndStatuslessRows(Base):
         self.assertIn("H3", rows[0][2])
         self.assertNotIn("H1", rows[0][2])
 
+    def test_the_escape_entity_does_not_flip_the_semicolon_count(self):
+        """REF-30 regression. `cli.py render` writes a `|` as `&#124;`, which carries a
+        semicolon, so two pipes in one hypothesis inject two semicolons and this check --
+        `len(hyp) >= 25 and hyp.count(";") >= 2` -- would fire on a row that bundles
+        nothing. The rows it would have fired on are exactly the ones REF-30 was filed for
+        (absolute-value bars such as `|U|` and `|q - p|`), so the escape would have made
+        the fix's own evidence look like a bundling problem. A predicate that counts
+        characters must count them on the text, not on the transport encoding."""
+        self.ledger("""<!-- ledger-format: table-v1 -->
+| id | hypothesis | status | evidence |
+|---|---|---|---|
+| H1 | at most one live lock per user: `&#124;{ i : locks[i].amount > 0 }&#124; <= 1` | UNTESTED | src/A.sol |
+""")
+        self.assertEqual([], doctor.check_bundled_rows(self.eng),
+                         "the escape entity's own semicolons must not read as bundling")
+
+    def test_a_genuine_bundle_still_warns_when_the_row_carries_the_escape(self):
+        """The other half: decoding must not make the check blind. This row bundles three
+        mechanisms AND contains an escaped pipe."""
+        self.ledger("""<!-- ledger-format: table-v1 -->
+| id | hypothesis | status | evidence |
+|---|---|---|---|
+| H1 | `&#124;U&#124;` grows; the fee rounds down; the oracle goes stale | UNTESTED | src/A.sol |
+""")
+        self.assertIn("H1", doctor.check_bundled_rows(self.eng)[0][2])
+
     def test_neither_check_claims_a_guard_will_block(self):
         """WARN must not borrow BAD's authority: no guard refuses on either predicate."""
         self.ledger()

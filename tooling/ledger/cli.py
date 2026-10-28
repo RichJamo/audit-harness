@@ -20,9 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "guards"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from store import (  # noqa: E402
     CREATE, append, read_events, replay, revisits, status_path, events_path, RENDER, HEADER,
 )
+from table_cell import escape_cell, unescape_cell  # noqa: E402
 from ledger_guard import (  # noqa: E402
     ROW_RE, FORMAT_MARKER, STATUSES, check_g1, check_g2, check_g12, check_g14,
     check_below_bar, check_blocked, check_evidence_function, check_refuted_reason,
@@ -191,7 +193,17 @@ def cmd_import(a) -> int:
         rid = ROW_RE.search(line).group(1)
         if rid in existing:
             continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # unescape_cell: the log stores the text a human wrote, never the transport
+        # encoding. The row generators escape `|` on their way into the table this reads,
+        # and render re-escapes on the way out, so the board is byte-identical either way
+        # -- but a guard reading the log sees real prose.
+        #
+        # NOT a fix for a raw `|` from any source. Cells are taken by POSITION, and
+        # nothing here checks the row's width against its header, so a hand-authored or
+        # hunter-authored table with a bare pipe in a free-text cell still shifts every
+        # column after it and logs the wrong text, silently and into an append-only file.
+        # That hole predates REF-30 and is not narrowed by it.
+        cells = [unescape_cell(c.strip()) for c in line.strip().strip("|").split("|")]
         append(eng, {"id": rid, "event": CREATE, "status": CREATE_STATUS,
                      "hypothesis": cells[1] if len(cells) > 1 else "",
                      "entry": cells[2] if len(cells) > 2 else "",
@@ -337,18 +349,26 @@ def _render_parts(eng: Path) -> tuple[str, str, str]:
         # just accepted (`--human`, satisfying G2) failed G2 the moment it was rendered, and
         # the only "fix" would have been to hand-edit the render, which G11 forbids. The CLI's
         # output must be able to satisfy the CLI's own guards. Found on engagement 16 2026-09-04.
+        #
+        # REF-30: every one of these is FREE TEXT, and since REF-26 a kill must carry a
+        # prose --reason, which is where a `|` comes from. Unescaped, one pipe re-splits
+        # the row: `import` then reads the wrong columns and ledger_guard.field() cuts
+        # the value off at that pipe, while `verify` sees nothing wrong because the
+        # corruption round-trips through a fresh render. A newline breaks the row
+        # outright. escape_cell() is the write half; field() decodes on read.
         parts = []
         if f.get("evidence"):
-            parts.append(f"EVIDENCE: {f['evidence']}")
+            parts.append(f"EVIDENCE: {escape_cell(f['evidence'])}")
         if f.get("dedup"):
-            parts.append(f"DEDUP: {f['dedup']}")
+            parts.append(f"DEDUP: {escape_cell(f['dedup'])}")
         if f.get("human"):
-            parts.append(f"HUMAN: {f['human']}")
+            parts.append(f"HUMAN: {escape_cell(f['human'])}")
         if f.get("reason"):
-            parts.append(f"REASON: {f['reason']}")
+            parts.append(f"REASON: {escape_cell(f['reason'])}")
         ev = " · ".join(parts)
-        table_lines.append(f"| {rid} | {f.get('hypothesis','')} | {f.get('entry','')} | "
-                           f"{f.get('invariant','')} | `{row['status']}` | {ev} |")
+        table_lines.append(f"| {rid} | {escape_cell(f.get('hypothesis',''))} | "
+                           f"{escape_cell(f.get('entry',''))} | "
+                           f"{escape_cell(f.get('invariant',''))} | `{row['status']}` | {ev} |")
     table = "\n".join(table_lines) + "\n"
 
     return preamble, header, table
