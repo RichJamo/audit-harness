@@ -28,6 +28,33 @@ contract SystemHandler is Test {
 
     // ---- Coverage counters (prove deep states reached; see the canary in the test) ----
     uint256 public covFund; uint256 public covDistribute; uint256 public covRedeem; uint256 public covClaim;
+    // ---- Liveness, one action per lock sink (a place where an exit, repayment or liquidation can be blocked) ----
+    // The check runs HERE, in a fuzzed action, not in the invariant: Foundry discards state changes made
+    // inside an invariant_* call, and under fail-on-revert = false an assert in an action is swallowed as
+    // a revert. So the action counts each check and records a violation in a ghost flag, and
+    // invariant_liveness_SINK asserts the flag. The canary requires livenessChecks_SINK > 0 for EVERY sink.
+    // Copy the counter with the action, one per sink: a shared counter lets one reached sink hide another
+    // whose precondition was never met.
+    uint256 public livenessChecks_SINK; // times this sink's precondition held and its exit paths were tried
+    bool public livenessViolated;      // the precondition held and every exit path reverted
+    string public livenessViolation;   // which sink, for the failure message
+    // Copy once per lock sink and rename SINK (doCheckLiveness_liquidation, ..._withdraw).
+    function doCheckLiveness_SINK(uint256 aSeed) external {
+        // address u = actors[aSeed % actors.length];
+        // if (!<precondition for u, e.g. health factor < 1 with seizable collateral>) return;
+        // uint256 snap = vm.snapshotState();          // dry run: the check must not move the system
+        // bool anyOk = <try each exit path for u (each collateral x debt pair, shares and assets); true if one succeeds>;
+        //              (vm.prank(u), or the liquidator, before each try: as the handler, an exit may revert for the wrong reason)
+        // vm.revertToStateAndDelete(snap);            // delete it too: one snapshot a check adds up over a deep campaign
+        // livenessChecks_SINK++;                      // AFTER the revert, or the revert undoes it
+        // if (!anyOk) { livenessViolated = true; livenessViolation = "SINK"; }
+    }
+
+    // ---- For invariant_noValueCreated: net value held, and losses the protocol has RECOGNISED ----
+    // function actorsNetValue() external view returns (int256);        // wallets + position value - debt, all actors
+    // function feeReceiversNetValue() external view returns (int256);  // wallet AND accrued fee shares/positions
+    // function totalFundedIn() external view returns (uint256);        // everything the actors were given or minted
+    // uint256 public newlyRecognisedLoss;                              // bad debt / deficit written during the run
 
     constructor(/* IProtocol _p, MockToken _t, */ address _admin, uint256[] memory _entities) {
         admin = _admin;
