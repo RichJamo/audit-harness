@@ -4,7 +4,15 @@ pragma solidity ^0.8.20;
 // ===========================================================================================
 // WHOLE-SYSTEM INVARIANT TEST TEMPLATE
 // Deploy the full protocol + multiple entities, register SystemHandler as the fuzz target,
-// and assert the four system properties. ALWAYS prove coverage with the canary before trusting green.
+// and assert the system properties below. ALWAYS prove coverage with the canary before trusting green.
+//
+// PROPERTY HISTORY (keep it): every time a property is refined, say what failed and why the property,
+// not the code, was wrong. On a fresh harness the first failures are more likely the property than the
+// protocol (engagement 23: a property demanded health >= 1 after every withdraw, but withdrawing a supply
+// that is not collateral rightly skips the check; a random liquidation offered a collateral the protocol
+// rightly refuses).
+// Read the failing branch first; refine the property to the DOCUMENTED behaviour; record it here.
+//   <date>  <property>  <what failed>  <why the property was wrong, with file:line>
 // ===========================================================================================
 
 import {Test} from "forge-std/Test.sol";
@@ -43,12 +51,59 @@ contract SystemInvariantTest is Test {
         // for each entity e: assertLe(handler.paidOut(e), funding(e) + yield(e) + tolerance(e), "OVERPAY");
     }
 
+    // Tolerance for invariant_noValueCreated: 0 unless a documented rounding failure forces it (see below).
+    int256 constant TOLERANCE = 0;
+
+    /// @dev NO VALUE CREATED: what the actors and every fee receiver hold, minus what they put in,
+    ///      is at most the loss the protocol has newly RECOGNISED (bad debt, deficit, write-off).
+    ///      Value nobody recorded as lost cannot appear in anyone's hands. It is generic and tight: on
+    ///      engagement 23 it held over about 50,000 sequences with zero tolerance, while the actors and
+    ///      fee receiver together sat only a few wei below the limit.
+    ///        gained = sum over actors(wallet + position value - debt)
+    ///               + sum over fee receivers(wallet + accrued fee shares/positions) - fundedIn
+    ///        assert gained <= newlyRecognisedLoss + TOLERANCE
+    ///      TOLERANCE is 0. Raise it only for a documented rounding failure, and record why in the
+    ///      property history. It is NOT the slack: the slack is how far below the limit the system sits,
+    ///      measured by the boundary test below, and putting it into the bound lets that much leak through.
+    ///      Count fee receivers' accrued shares, not only their wallets: with accrued fees left out, the
+    ///      headroom equals the realised fees, and a leak of that size goes unseen.
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_noValueCreated() public view {
+        // int256 gained = handler.actorsNetValue() + handler.feeReceiversNetValue() - int256(handler.totalFundedIn());
+        // assertLe(gained, int256(handler.newlyRecognisedLoss()) + TOLERANCE, "VALUE CREATED from nowhere");
+    }
+
+    /// @dev LIVENESS, one per lock sink (a place where a user's exit, repayment or liquidation can be
+    ///      blocked). Whenever the precondition holds, the action must succeed on SOME path. A pause,
+    ///      freeze or halt on an UNRELATED asset or market must not block it. The check itself runs in the handler's
+    ///      doCheckLiveness_SINK action, which counts it and sets a ghost flag; this property asserts
+    ///      the flag. The canary requires the count: a liveness property that never met its
+    ///      precondition proves nothing.
+    /// Copy once per lock sink and rename SINK (invariant_liveness_liquidation, ..._withdraw).
+    /// forge-config: default.invariant.fail-on-revert = false
+    function invariant_liveness_SINK() public view {
+        // assertFalse(handler.livenessViolated(), string.concat(handler.livenessViolation(),
+        //     ": precondition held but every exit path reverted"));
+    }
+
+    /// @dev NON-VACUITY AT THE MEASURED BOUNDARY. Measure the slack (how far below the limit the system
+    ///      sits), then show that `slack` from nowhere still passes and `slack + 1` trips the property.
+    ///      A guessed boundary fails in the wrong direction: on engagement 23 "one wei from nowhere trips
+    ///      the property" failed, because the actors already sat several wei below the limit.
+    function test_noValueCreated_detectsValueFromNowhereAtTheBoundary() public {
+        // int256 slack = <limit> - <gained>;  assertGe(slack, 0);
+        // deal(address(token), actor, balance + uint256(slack));      invariant_noValueCreated();   // must pass
+        // deal(address(token), actor, balance + uint256(slack) + 1);
+        // vm.expectRevert(); this.invariant_noValueCreated();         // must trip; passing here is the failure
+    }
+
     // ---------------------------------------------------------------------------------------
     // COVERAGE CANARY — run, watch it FAIL, then delete. A green invariant that never reached
     // redeem/claim across multiple entities proves nothing.
     //   function afterInvariant() public view {
-    //     require(!(handler.covRedeem()>0 && handler.covClaim()>0 && handler.withdrawnToSink()>0),
-    //       "CANARY: multi-entity redeem+claim+withdraw reached");
+    //     require(!(handler.covRedeem()>0 && handler.covClaim()>0 && handler.withdrawnToSink()>0
+    //               && handler.livenessChecks_SINK()>0),   // one such term PER lock sink
+    //       "CANARY: multi-entity redeem+claim+withdraw and every sink's liveness precondition reached");
     //   }
     //   Run: FOUNDRY_INVARIANT_RUNS=10 FOUNDRY_INVARIANT_DEPTH=1500 forge test --mt invariant_solvency
     // ---------------------------------------------------------------------------------------
