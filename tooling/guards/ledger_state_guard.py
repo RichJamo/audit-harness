@@ -285,6 +285,7 @@ def main() -> int:
     roots = [Path(override)] if override else engagement_roots(cwd)
 
     msgs: list[str] = []
+    crashed: list[str] = []
     for eng in roots:
         try:
             m, snap, block = evaluate_engagement(eng, session)
@@ -293,9 +294,23 @@ def main() -> int:
                 msgs += m
         except OSError:
             continue          # an unreadable engagement is not a reason to trap the turn
+        except Exception as e:                   # noqa: BLE001  one engagement must not silence the rest
+            # A crash here used to end the hook with a traceback, so every other engagement went
+            # unchecked for the turn. It is reported, not blocked on: the block limit is counted
+            # inside evaluate_engagement, so a crash that blocked could trap the session.
+            crashed.append(f"ledger STATE guard ERROR on {eng}: {type(e).__name__}: {e}. That "
+                           f"engagement was not checked this turn.")
+            continue
 
     if not msgs:
+        # Claude Code shows nobody the stderr of an exit-0 Stop hook, so a crash goes out as a
+        # systemMessage, which the user sees, while the turn still ends unblocked.
+        if crashed:
+            print(json.dumps({"systemMessage": " ".join(crashed)}))
+
         return 0
+    for c in crashed:
+        print(c, file=sys.stderr)
     print("Ledger state is invalid (docs/guard-register.md). This fires on the ledger's "
           "state, so it catches writes made by any tool -- sed, a script, a subagent -- "
           "not just Write/Edit:", file=sys.stderr)

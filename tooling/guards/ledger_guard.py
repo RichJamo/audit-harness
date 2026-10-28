@@ -317,11 +317,29 @@ def load_sidecar(rel: str, eng: Path) -> tuple[dict | None, str | None]:
 
 
 def as_list(v) -> list[str]:
+    """A sidecar field as a list of strings. Sidecars are hand-written YAML, so a value that should
+    be a list may arrive as a string, a number or a mapping; none of those may raise here, because
+    an exception in the PreToolUse hook would let the write through. A number or a mapping counts
+    as ONE entry (its string form), not as its keys."""
     if v is None:
         return []
     if isinstance(v, str):
         return [x.strip() for x in re.split(r"[,;\n]", v) if x.strip()]
+    if not isinstance(v, (list, tuple)):
+        v = [v]
     return [str(x).strip() for x in v if str(x).strip()]
+
+
+def searched_path(sp: str, eng: Path) -> Path | None:
+    """A `searched:` entry as a path under `eng` (or absolute), or None when the string cannot be a
+    path on this system. An embedded NUL is rejected by name: `exists()` reports it as missing, but
+    `resolve()` raises ValueError on it."""
+    if "\x00" in sp:
+        return None
+    try:
+        return Path(sp) if Path(sp).is_absolute() else (eng / sp)
+    except (OSError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------- G3
@@ -411,9 +429,9 @@ def check_g1(row_id: str, dedup_rel: str | None, row_text: str, eng: Path,
 
     searched, resolved = as_list(data.get("searched")), []
     for sp in searched:
-        cand = Path(sp) if Path(sp).is_absolute() else (eng / sp)
-        if not cand.exists():
-            errs.append(f"G1 [{row_id}] searched: names a file that does not exist: {sp}")
+        cand = searched_path(sp, eng)
+        if cand is None or not cand.exists():
+            errs.append(f"G1 [{row_id}] searched: names a file that does not exist: {sp!r}")
         else:
             resolved.append(cand)
     if not marker and not any("potential-risks" in str(c) for c in resolved):
@@ -585,7 +603,13 @@ def check_g19(row_id: str, data: dict, eng: Path) -> list[str]:
     # notes or agent-written keys would let the row's words stand in for the entry's (found in review).
     texts = []
     for sp in as_list(data.get("searched")):
-        cand = (Path(sp) if Path(sp).is_absolute() else (eng / sp)).resolve()
+        cand = searched_path(sp, eng)
+        if cand is None:
+            continue
+        try:
+            cand = cand.resolve()
+        except (OSError, ValueError):
+            continue
         try:
             rel = cand.relative_to(eng.resolve()).as_posix()
         except ValueError:
@@ -823,10 +847,12 @@ def check_g14(row_id: str, dedup_rel: str | None, eng: Path, every: bool = False
         return []
     resolved = set()
     for sp in as_list(data.get("searched")):
-        cand = Path(sp) if Path(sp).is_absolute() else (eng / sp)
+        cand = searched_path(sp, eng)
+        if cand is None:
+            continue
         try:
             resolved.add(cand.resolve())
-        except OSError:
+        except (OSError, ValueError):
             continue
     if every:
         # A folder in `searched:` counts for every body file under it ("grepped the whole folder").
@@ -1940,14 +1966,22 @@ def main() -> int:
     if not fp:
         return 0
     path = Path(fp)
-    if "content" in ti:                            # Write
-        content = ti["content"]
-    elif "new_string" in ti:                       # Edit: apply the patch
-        base = path.read_text(errors="ignore") if path.exists() else ""
-        content = base.replace(ti.get("old_string", ""), ti["new_string"], 1)
-    else:
-        return 0
-    errs = evaluate(path, content)
+    try:
+        if "content" in ti:                        # Write
+            content = ti["content"]
+        elif "new_string" in ti:                   # Edit: apply the patch
+            base = path.read_text(errors="ignore") if path.exists() else ""
+            content = base.replace(ti.get("old_string", ""), ti["new_string"], 1)
+        else:
+            return 0
+        errs = evaluate(path, content)
+    except Exception as e:                       # noqa: BLE001  any crash must refuse, not allow
+        # Claude Code blocks only on exit 2; a traceback exits 1 and the write goes through. This
+        # hook fails CLOSED, so a check that raises refuses the write and says which one failed.
+        print(f"BLOCKED by ledger guard: a check raised {type(e).__name__}: {e}. The guard is "
+              f"failing closed, so this write is refused. Fix the file being written or the sidecar "
+              f"it cites, or report the crash (docs/guard-register.md).", file=sys.stderr)
+        return 2
     if errs:
         print("BLOCKED by ledger guard (docs/guard-register.md):", file=sys.stderr)
         for e in errs:

@@ -575,6 +575,12 @@ def cmd_dedup_skeleton(a) -> int:
               f"the Stop hook re-reads it every turn. Edit it by hand if it must change.", file=sys.stderr)
         return 2
     out = eng / "ledger" / "dedup" / f"{a.id}.md"
+    # The id comes from the command line and `add` accepts any id, so an id holding a path
+    # ("../HEADER") would otherwise write over another file or leave the engagement.
+    if "/" in a.id or "\\" in a.id or out.resolve().parent != (eng / "ledger" / "dedup").resolve():
+        print(f"dedup-skeleton: {a.id!r} is not a plain row id; the sidecar would land outside "
+              f"ledger/dedup/", file=sys.stderr)
+        return 2
     if out.exists() and not a.force:
         print(f"dedup-skeleton: {out.relative_to(eng)} exists; pass --force to replace it", file=sys.stderr)
         return 2

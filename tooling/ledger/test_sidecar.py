@@ -158,6 +158,18 @@ class TestCommands(Base):
         self.cli("add", "--id", "R-1", "--hypothesis", "rounding favours the liquidator",
                  "--entry", "`Vault.seizeCollateral`")
 
+    def test_dedup_skeleton_never_writes_outside_ledger_dedup(self):
+        """A row id is taken from the command line and joined into the output path. `add` accepts
+        any id, so an id holding a path must not let the skeleton land elsewhere."""
+        (self.eng / "ledger" / "HEADER.md").write_text("# header\n")
+        for rid in ("../HEADER", "../../outside"):
+            self.cli("add", "--id", rid, "--hypothesis", "h", "--entry", "`Vault.f`")
+            with self.subTest(rid=rid):
+                code, _, err = self.cli("dedup-skeleton", "--id", rid, "--force")
+                self.assertEqual(2, code, err)
+        self.assertEqual("# header\n", (self.eng / "ledger" / "HEADER.md").read_text())
+        self.assertFalse((self.eng / "outside.md").exists())
+
     def test_dedup_skeleton_writes_once(self):
         code, out, _ = self.cli("dedup-skeleton", "--id", "R-1", "--match-verdict", "NEW")
         self.assertEqual(0, code)

@@ -352,5 +352,53 @@ class TestFreshEngagementScaffold(unittest.TestCase):
         self.assertFalse(any("G3" in m for m in msgs), msgs)
 
 
+class TestOneCrashDoesNotSilenceOtherEngagements(unittest.TestCase):
+    """main() caught only OSError, so one engagement whose check raised ended the Stop hook with a
+    traceback and every other engagement went unchecked that turn. A crash is now reported on
+    stderr, or as a systemMessage when nothing blocks, and the next engagement is still evaluated."""
+
+    def test_the_next_engagement_is_still_checked(self):
+        import contextlib, io, unittest.mock
+        bad, good = Path("/nonexistent/bad"), Path("/nonexistent/good")
+        seen = []
+
+        def evaluate(eng, session):
+            seen.append(eng)
+            if eng == bad:
+                raise ValueError("embedded null byte")
+            return ["G2 [H1] a real violation"], {}, True
+
+        err = io.StringIO()
+        with unittest.mock.patch.object(LSG, "engagement_roots", return_value=[bad, good]), \
+             unittest.mock.patch.object(LSG, "evaluate_engagement", side_effect=evaluate), \
+             unittest.mock.patch.object(LSG, "save_snapshot"), \
+             unittest.mock.patch.dict(os.environ, {"AUDIT_ENGAGEMENT_ROOT": ""}), \
+             unittest.mock.patch("sys.stdin", io.StringIO('{"session_id": "s", "cwd": "/"}')), \
+             contextlib.redirect_stderr(err):
+            rc = LSG.main()
+        self.assertEqual([bad, good], seen)
+        self.assertEqual(2, rc, "the good engagement's violation still blocks")
+        self.assertIn("ERROR on /nonexistent/bad", err.getvalue())
+        self.assertIn("G2 [H1]", err.getvalue())
+
+    def test_a_crash_alone_is_shown_to_the_user_without_blocking(self):
+        """Exit 0 keeps the session from being trapped, but Claude Code shows nobody the stderr of an
+        exit-0 Stop hook, so the crash must also go out as a systemMessage on stdout."""
+        import contextlib, io, json as _json, unittest.mock
+        bad = Path("/nonexistent/bad")
+        out = io.StringIO()
+        with unittest.mock.patch.object(LSG, "engagement_roots", return_value=[bad]), \
+             unittest.mock.patch.object(LSG, "evaluate_engagement", side_effect=ValueError("boom")), \
+             unittest.mock.patch.dict(os.environ, {"AUDIT_ENGAGEMENT_ROOT": ""}), \
+             unittest.mock.patch("sys.stdin", io.StringIO('{"session_id": "s", "cwd": "/"}')), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = LSG.main()
+        self.assertEqual(0, rc)
+        msg = _json.loads(out.getvalue())["systemMessage"]
+        self.assertIn("ERROR on /nonexistent/bad", msg)
+        self.assertIn("boom", msg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

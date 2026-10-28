@@ -8,7 +8,7 @@ import ledger_guard  # noqa: E402  (G11 tests drive evaluate() and main() direct
 from ledger_guard import (  # noqa: E402
     evaluate, parse_rows, parse_row_lines, engagement_ledgers, resolve_artifact,
     TOOLKIT_ROOT, FORMAT_MARKER, is_ledger, row_status, engagement_root,
-    header_missing_fields, HEADER_REQUIRED_FIELDS, RUN_WITHOUT_MODEL, check_g1,
+    header_missing_fields, HEADER_REQUIRED_FIELDS, RUN_WITHOUT_MODEL, check_g1, as_list,
 )
 
 PRIOR_ART = (
@@ -1262,6 +1262,63 @@ class TestG19ClaimsQuoted(Base):
                                   "new_string": "result: MATCH"}}
         with unittest.mock.patch("sys.stdin.read", return_value=__import__("json").dumps(payload)):
             self.assertEqual(ledger_guard.main(), 2)
+
+    def test_a_sidecar_that_crashes_a_check_is_refused_not_let_through(self):
+        """The PreToolUse hook fails CLOSED. Claude Code blocks only on exit 2; a traceback exits 1
+        and the Write goes through. G19 runs only in this hook, so a sidecar that crashed it was
+        never judged again. Each `searched:` below once raised inside a check."""
+        import io, json as _json, contextlib, yaml
+        sc = self.eng / "ledger" / "dedup" / "T-3.md"
+        sc.parent.mkdir(parents=True, exist_ok=True)
+        for searched in (1, ["a\0b"]):
+            data = {"result": "MATCH", "searched": searched,
+                    "claims": [{"caller": "x", "quote": "y" * 25}]}
+            payload = _json.dumps({"tool_input": {"file_path": str(sc),
+                                                  "content": yaml.safe_dump(data)}})
+            err = io.StringIO()
+            with self.subTest(searched=searched), contextlib.redirect_stderr(err), \
+                 unittest.mock.patch("sys.stdin", io.StringIO(payload)):
+                self.assertEqual(2, ledger_guard.main(), err.getvalue())
+                # ...and refused by G19 itself, not only by main()'s last-resort handler.
+                errs = evaluate(sc, yaml.safe_dump(data))
+                self.assertTrue(any(e.startswith("G19") for e in errs), errs)
+
+    def test_an_unexpected_error_fails_closed_and_says_so(self):
+        """Whatever raises, main() refuses the write and names the failure, never a bare traceback."""
+        import io, json as _json, contextlib
+        payload = _json.dumps({"tool_input": {"file_path": str(self.eng / "ledger" / "ledger.md"),
+                                              "content": "| H1 | x | UNTESTED |\n"}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+             unittest.mock.patch("sys.stdin", io.StringIO(payload)), \
+             unittest.mock.patch.object(ledger_guard, "evaluate", side_effect=RuntimeError("boom")):
+            self.assertEqual(2, ledger_guard.main())
+        self.assertIn("failing closed", err.getvalue())
+        self.assertIn("boom", err.getvalue())
+
+    def test_a_scalar_searched_value_is_read_as_one_entry(self):
+        self.assertEqual(["1"], as_list(1))
+        self.assertEqual(["a.txt"], as_list("a.txt"))
+        self.assertEqual(["a", "b"], as_list(["a", "b"]))
+
+    def test_without_pyyaml_a_match_sidecar_is_refused_unchecked(self):
+        """A missing dependency must not turn the claims check off: a MATCH is refused, anything
+        else passes through to the guards that can still run."""
+        import builtins
+        real_import = builtins.__import__
+
+        def no_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("no yaml")
+            return real_import(name, *args, **kwargs)
+
+        sc = self.eng / "ledger" / "dedup" / "T-3.md"
+        sc.parent.mkdir(parents=True, exist_ok=True)
+        with unittest.mock.patch("builtins.__import__", side_effect=no_yaml):
+            refused = ledger_guard.check_sidecar_write(sc, "result: MATCH\nclaims: []\n")
+            silent = ledger_guard.check_sidecar_write(sc, "result: PARTIAL\n")
+        self.assertTrue(refused and "pyyaml" in refused[0], refused)
+        self.assertEqual([], silent)
 
     def test_a_sidecar_outside_an_engagement_is_silent(self):
         import yaml
