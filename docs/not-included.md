@@ -32,6 +32,15 @@ repository.
 | `tooling/opposite-tail.py` | a detector that flags a quantity resolved in one direction only (G8a) |
 | `tooling/refutation-critic.py` | a red-team critic that checks what a refutation's proof-of-concept did not exercise (G8b) |
 | `tooling/fix-adjacency.py` | a scanner that looks for findings adjacent to a prior fix |
+| `tooling/known-issue-brief.py` | renders the known-issue matcher's brief and returns each row's match verdict, clause and whether the row attacks the entry (the answers G16 reads) |
+| `tooling/poc-scaffold.py` | writes a row's PoC or symbolic check inside the target's test tree; G15 refuses evidence that still carries its unfilled mark |
+
+## Agent briefs
+
+| file | what it is |
+|---|---|
+| `templates/known-issue-filter-brief.md` | the brief a known-issue matcher is given, with the matching rule rendered into it |
+| `templates/prior-audit-key-brief.md` | the brief for turning one prior-audit report into a per-finding key under `00-triage/prior-audit-keys/` |
 
 ## Measurement notes under `bench/`
 
@@ -48,3 +57,4 @@ repository.
 | `bench/PREREG-clearance-rows.md` | a pre-registered experiment on whether a hunter's clearance should emit a row for the opposite tail |
 | `bench/contract-clearance-clause.md` | the treatment arm of that pre-registered experiment |
 | `bench/PREREG-generator-conversion.md` | a pre-registered experiment on hypothesis-generator conversion |
+| `bench/PREREG-full-text-grader.md` | a pre-registered grader experiment; one arm showed a model find an unstated claim and still answer "same", which is why G19 decides in code |

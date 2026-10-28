@@ -43,6 +43,22 @@ mkdir -p "$ROOT/00-triage/prior-audits" \
 # makes both names the same folder, so the mistake has nowhere to put the files.
 ln -s prior-audits "$ROOT/00-triage/prior-art"
 
+# REF-31: every prior-audit report must be read into an extract and a key before any spend. This
+# file switches that check on (tooling/prior_corpus.py); it sits beside prior-audits/, not in it,
+# because any file in prior-audits/ satisfies G1's "corpus on disk".
+cat > "$ROOT/00-triage/prior-audit-index.md" <<'INDEX'
+# Prior-audit index
+
+Every report under `prior-audits/` must be read into `prior-audits-text/<name>.txt` and
+`prior-audit-keys/<name>.json` before any row reaches TIER-1 (`tooling/prior_corpus.py`). A report
+whose extract and key share its file name needs no line here. Add a line for a report delivered as a
+folder (each round folder, such as `v2/`, separately), for an extract renamed by hand, and for a file
+that is not a report:
+
+- <path under prior-audits/> | text: <file in prior-audits-text/> | key: <file in prior-audit-keys/>
+- <path under prior-audits/> | not a report: <why>
+INDEX
+
 cp "$TOOLKIT/templates/ledger.template.md" "$ROOT/ledger/ledger.md"
 
 # REF-17: record which version of the skill this engagement ran. Stamped here, never typed by

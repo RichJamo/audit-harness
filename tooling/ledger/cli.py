@@ -10,6 +10,9 @@ between them for a write path to slip through.
   python3 tooling/ledger/cli.py phase   --done 2
   python3 tooling/ledger/cli.py render
   python3 tooling/ledger/cli.py verify
+  python3 tooling/ledger/cli.py dedup-skeleton --id R-6 [--match-verdict NEW]
+  python3 tooling/ledger/cli.py find-quote "the passage you want to cite"
+  python3 tooling/ledger/cli.py known-review [--record R-6 --answer "agree: KNOWN"]
 
 Phase 1 implements the `-> TIER-1` transition only; that is where G1 fires and where
 spend is committed. Other transitions are phase 2 (see the design note).
@@ -25,11 +28,14 @@ from store import (  # noqa: E402
     CREATE, append, read_events, replay, revisits, status_path, events_path, RENDER, HEADER,
 )
 from table_cell import escape_cell, unescape_cell  # noqa: E402
+import sidecar  # noqa: E402  (dedup-skeleton, find-quote)
+from prior_corpus import summary as unread_summary, uncovered as uncovered_reports  # noqa: E402  REF-31
 from ledger_guard import (  # noqa: E402
-    ROW_RE, FORMAT_MARKER, STATUSES, check_g1, check_g2, check_g12, check_g14,
+    ROW_RE, FORMAT_MARKER, STATUSES, check_g1, check_g2, check_g12, check_g14, check_g16, check_g17,
     check_below_bar, check_blocked, check_evidence_function, check_refuted_reason,
     engagement_root, load_sidecar,
     header_missing_fields,
+    KNOWN_REVIEW_FILE, check_g19, check_g20, known_rows, known_reviews,
 )
 
 # Row creation is DELIBERATELY UNGATED (CLAUDE.md constraint 1): phases 1-2 generate
@@ -247,11 +253,19 @@ def cmd_promote(a) -> int:
         if "G1" in row["satisfied"]:
             print(f"{a.id}: G1 already discharged (locked) -- not re-charging")
         else:
-            errs += check_g1(a.id, dedup, text, eng)
+            errs += check_g1(a.id, dedup, text, eng, with_terms=True)
             # G14 (REF-3): a NO-MATCH cleared against section extracts alone. Charged with G1
             # and never separately -- it is part of the same dedup obligation, so State
             # Locking discharges both together.
-            errs += check_g14(a.id, dedup, eng)
+            errs += check_g14(a.id, dedup, eng, every=True)
+            # REF-31: every prior-audit report is read into an extract and a key before any spend,
+            # where the engagement keeps 00-triage/prior-audit-index.md (silent otherwise; see prior_corpus).
+            unread = uncovered_reports(eng)
+            if unread:
+                errs.append(f"REF-31 [{a.id}] {len(unread)} prior-audit report file(s) not read into an "
+                            f"extract and a key: {unread_summary(unread)}. Extract and key each "
+                            f"(templates/prior-audit-key-brief.md), or record the pairing in "
+                            f"00-triage/prior-audit-index.md. `engagement-doctor.py` lists them all.")
         # REF-23: not locked, deliberately -- unlike G1/G14 this is not a per-row spend
         # obligation, it is an engagement-wide fact that can regress (someone deletes or
         # edits the header after an earlier row already reached TIER-1), so it is worth
@@ -267,6 +281,13 @@ def cmd_promote(a) -> int:
             if missing:
                 errs.append(f"REF-23 [{a.id}] {HEADER} is missing {', '.join(missing)}.")
 
+    # G17: every function the entry names is searched on its own in the known issues, filed
+    # issues and README, and each hit is answered (engagement 22).
+    # Charged with the dedup obligation, so a row whose G1 is already discharged (locked) is
+    # not re-judged; this also covers a sidecar cited on a no-waypoint exit such as SCOPE-HELD.
+    if dedup and "G1" not in row["satisfied"]:
+        errs += check_g17(a.id, dedup, row["fields"].get("entry"), eng)
+
     # G2 protects kills, G10 protects claims: same predicate, opposite failure. A REFUTED
     # row with no evidence is an argument-kill; a CONFIRMED row with no evidence is an
     # unbacked finding. SCOPE-HELD must cite a human -- scope is never the model's call.
@@ -279,6 +300,13 @@ def cmd_promote(a) -> int:
     # G12: a Known-Issue match retires the CLAIM, not the row.
     if a.to == "SCOPE-HELD":
         errs += check_g12(a.id, dedup, eng)
+        # G16: ...and a row attacking the entry's fix, mitigation or bound is not retired at all.
+        errs += check_g16(a.id, dedup, eng, require_answers=True)
+        # G20 (REF-32): ...and a hold declared to rest on a scope exclusion quotes it.
+        if a.exclusion:
+            errs += check_g20(a.id, a.reason, eng)
+    elif a.exclusion:
+        errs.append(f"G20 [{a.id}] --exclusion declares a SCOPE-HELD ruling; it means nothing on {a.to}.")
 
     # BELOW-BAR must cite the program bar it fails -- otherwise it is a silent drop.
     if a.to == "BELOW-BAR":
@@ -526,6 +554,108 @@ def cmd_count(a) -> int:
     return 0
 
 
+def cmd_dedup_skeleton(a) -> int:
+    """Write ledger/dedup/<id>.md for an existing row (engagement 23: three sidecars
+    were refused for their form alone). Refuses to overwrite without --force, and refuses an
+    unknown row, so a skeleton never lands beside nothing."""
+    eng = _eng(a.engagement)
+    row = replay(eng).get(a.id)
+    if row is None:
+        print(f"dedup-skeleton: no ledger row {a.id}", file=sys.stderr)
+        return 2
+    if "G1" in row["satisfied"]:
+        print(f"dedup-skeleton: {a.id} has already passed G1; its sidecar is the dedup record, and "
+              f"the Stop hook re-reads it every turn. Edit it by hand if it must change.", file=sys.stderr)
+        return 2
+    out = eng / "ledger" / "dedup" / f"{a.id}.md"
+    if out.exists() and not a.force:
+        print(f"dedup-skeleton: {out.relative_to(eng)} exists; pass --force to replace it", file=sys.stderr)
+        return 2
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(sidecar.skeleton(eng, a.id, row["fields"].get("entry", ""), a.match_verdict))
+    print(f"wrote {out.relative_to(eng)}: replace every {sidecar.TODO}, then "
+          f"promote with --dedup {out.relative_to(eng)}")
+    return 0
+
+
+def cmd_find_quote(a) -> int:
+    """Read-only: print each corpus file holding the passage, and the passage as G1 compares it."""
+    eng = _eng(a.engagement)
+    found = sidecar.find_quote(eng, a.text)
+    if not found:
+        print("find-quote: not found in 00-triage/potential-risks/ or 00-triage/prior-audits-text/ "
+              "(case-sensitive; check the wording)", file=sys.stderr)
+        return 1
+    for f, text in found:
+        print(f"{f}\n  quote: {text}")
+    return 0
+
+
+def cmd_known_review(a) -> int:
+    """Print every row the matcher called KNOWN on one page, or record the human's answer on one.
+
+    Richard, 2026-10-26: a KNOWN row is ranked last and in practice never tested, so each one goes in
+    front of him before Phase 5 with the row's claim, the entry's quote and the claims list, and his
+    answer is recorded per row in KNOWN_REVIEW_FILE (the doctor reports unanswered rows after
+    Phase 5). Printing writes nothing. `--record` appends one line and refuses a row that is not
+    KNOWN, or an answer that is empty or spans lines (one record per line, as PHASES.md).
+    """
+    eng = _eng(a.engagement)
+    rows = known_rows(eng)
+    if a.record or a.answer is not None:
+        answer = (a.answer or "").strip()
+        if not a.record or not answer:
+            print("known-review: --record <id> needs --answer \"...\" (the human's answer)", file=sys.stderr)
+            return 2
+        if any(c in answer for c in "\r\n"):
+            print("known-review: --answer must be a single line: the file holds one record per line",
+                  file=sys.stderr)
+            return 2
+        if a.record not in {rid for rid, *_ in rows}:
+            print(f"known-review: {a.record} is not a KNOWN row (its sidecar does not say result: MATCH)",
+                  file=sys.stderr)
+            return 2
+        p = eng / KNOWN_REVIEW_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.is_file():
+            p.write_text("# The human's answer on each KNOWN row, written by `cli.py known-review --record`.\n"
+                         "# A later line for the same row wins.\n\n")
+        with p.open("a") as fh:
+            fh.write(f"{a.record}: {answer}\n")
+        print(f"{a.record}: {answer}  -> {p}")
+        return 0
+    reviews = known_reviews(eng)
+    out = [f"# KNOWN rows for review -- {eng.name}", "",
+           f"{len(rows)} row(s) the matcher called KNOWN (dedup sidecar `result: MATCH`). Each is ranked "
+           f"last and in practice never tested. For each: does the entry state every caller and impact "
+           f"the row claims? Record the answer with `cli.py known-review --record <id> --answer \"...\"`.", ""]
+    for rid, line, rel, data in rows:
+        cells = [unescape_cell(c.strip()) for c in line.strip().strip("|").split("|")]
+        claims = data.get("claims")
+        if data.get("__unreadable__"):
+            out += [f"## {rid}", "", f"- sidecar unreadable: {rel}: {data['__unreadable__']}",
+                    f"- row: {' | '.join(c for c in cells[1:] if c)}", ""]
+            continue
+        out += [f"## {rid}", "",
+                f"- review: {'reviewed: ' + reviews[rid] if rid in reviews else 'not yet reviewed'}",
+                f"- sidecar: {rel}",
+                f"- row: {' | '.join(c for c in cells[1:] if c)}",
+                f"- entry quote: {' '.join(str(data.get('quote', '')).split())}",
+                f"- claims check: {'FAILS (G19 would refuse this sidecar if written today)' if check_g19(rid, data, eng) else 'passes'}"]
+        if isinstance(claims, list) and claims:
+            out.append("- claims:")
+            for c in claims:
+                c = c if isinstance(c, dict) else {"claim": c}
+                kind = next((k for k in ("caller", "impact") if c.get(k)), "claim")
+                out += [f"  - {kind}: {' '.join(str(c.get(kind, '')).split())}",
+                        f"    quote: {' '.join(str(c.get('quote', '')).split())}"]
+        else:
+            out.append("- claims: no claims: list (written before G19, or by hand)")
+        out.append("")
+    print("\n".join(out))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="audit ledger")
     ap.add_argument("--engagement")
@@ -549,8 +679,13 @@ def main(argv=None) -> int:
     p.add_argument("--human", help="required for SCOPE-HELD -- who ruled, and on what rule")
     p.add_argument("--reason", help="required for BELOW-BAR (the program bar this row fails to "
                                     "clear), BLOCKED / BLOCKED-OUT-OF-HARNESS (why the row "
-                                    "could not be PoC'd) and REFUTED (the argument the kill "
-                                    "rests on -- what the evidence showed)")
+                                    "could not be PoC'd), REFUTED (the argument the kill "
+                                    "rests on -- what the evidence showed) and SCOPE-HELD "
+                                    "--exclusion (40+ characters quoted from "
+                                    "00-triage/scope-exclusions.md)")
+    p.add_argument("--exclusion", action="store_true",
+                   help="SCOPE-HELD: this hold rests on a scope exclusion, so --reason quotes it "
+                        "from 00-triage/scope-exclusions.md (G20, REF-32)")
     p.set_defaults(fn=cmd_promote)
 
     ph = sub.add_parser("phase")
@@ -558,6 +693,23 @@ def main(argv=None) -> int:
     ph.add_argument("--skipped", choices=PHASE_IDS, help="this phase did not run")
     ph.add_argument("--reason", help="required for --skipped: what was not done, and why")
     ph.set_defaults(fn=cmd_phase)
+
+    sk = sub.add_parser("dedup-skeleton", help="write a row's dedup sidecar with every field in place")
+    sk.add_argument("--id", required=True)
+    sk.add_argument("--match-verdict", choices=sidecar.match_rule.MATCH_VERDICTS,
+                    help="the matcher's match verdict, if known; sets result: from tooling/match_rule.py")
+    sk.add_argument("--force", action="store_true", help="overwrite an existing sidecar")
+    sk.set_defaults(fn=cmd_dedup_skeleton)
+
+    fq = sub.add_parser("find-quote", help="find a passage in the prior-art text, ignoring line "
+                                           "breaks and PDF hyphenation; prints it as G1 compares it")
+    fq.add_argument("text")
+    fq.set_defaults(fn=cmd_find_quote)
+
+    kr = sub.add_parser("known-review", help="print every KNOWN row for the human, or record an answer")
+    kr.add_argument("--record", metavar="ID", help="the KNOWN row the human answered")
+    kr.add_argument("--answer", help="the human's answer, one line")
+    kr.set_defaults(fn=cmd_known_review)
 
     sub.add_parser("render").set_defaults(fn=cmd_render)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)

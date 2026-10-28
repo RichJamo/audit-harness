@@ -68,6 +68,8 @@ jobs:
           ./tooling/new-engagement.sh ci-target /tmp/eng
           # prior-art must be a link to prior-audits, so a corpus saved under either name is read
           test "$(readlink /tmp/eng/ci-target/00-triage/prior-art)" = prior-audits
+          # REF-31: the prior-audit index switches on the every-report check for new engagements
+          test -f /tmp/eng/ci-target/00-triage/prior-audit-index.md
           python - <<'PY'
           import sys
           from pathlib import Path

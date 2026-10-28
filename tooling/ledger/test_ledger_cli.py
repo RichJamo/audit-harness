@@ -14,7 +14,7 @@ there grandfathers real violations) and must NOT sit inside the toolkit repo (pa
 there are exempt from the hook, so 11 cases once flipped to ALLOW having run nothing).
 """
 from __future__ import annotations
-import contextlib, importlib.util, io, shutil, sys, tempfile, unittest
+import contextlib, importlib.util, io, re, shutil, sys, tempfile, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -493,11 +493,19 @@ class Promoted(Fixture):
         self.tier1()
 
     def answer_residue(self, text="none — the listed issue names the only cause, "
-                                   "the statement has one leg, and it states the worst impact.") -> None:
+                                   "the statement has one leg, and it states the worst impact.",
+                       clause="issue", attacks_entry="no") -> None:
         """Append an `unmatched:` answer to the fixture's sidecar. G12 checks that the
-        three questions were ASKED; `none` is a legal conclusion."""
+        three questions were ASKED; `none` is a legal conclusion. Also answers G16's two
+        (REF-31) as a plain known issue: the row's claim is about the entry's issue clause and
+        was not generated to attack it. Pass None to leave either unanswered."""
         p = self.eng / "ledger" / "dedup" / "R-6.md"
-        p.write_text(p.read_text().rstrip() + f"\nunmatched: |\n  {text}\n")
+        extra = f"\nunmatched: |\n  {text}\n"
+        if clause is not None:
+            extra += f"clause: {clause}\n"
+        if attacks_entry is not None:
+            extra += f"attacks_entry: {attacks_entry}\n"
+        p.write_text(p.read_text().rstrip() + extra)
 
 
 class TestWaypoint(Fixture):
@@ -879,13 +887,86 @@ class TestG12KnownIssueResidue(Promoted):
         self.assertEqual(0, self.run_cli("promote", "--id", "R-9", "--to", "SCOPE-HELD",
                                          "--human", "RJ: rogue-admin exclusion, sponsor rule 4.2"))
 
-    def test_partial_is_untouched_by_g12(self):
+    def test_partial_is_untouched_by_g12_and_g16(self):
         """PARTIAL already requires `unmatched:` through G1. G12 must not double-report."""
         p = self.eng / "ledger" / "dedup" / "R-6.md"
         p.write_text(p.read_text().replace("result: MATCH", "result: PARTIAL")
                      + "\nunmatched: the impact leg is not covered by the listed issue at all\n")
         self.assertEqual(0, self.run_cli("promote", "--id", "R-6", "--to", "SCOPE-HELD",
                                          "--human", "RJ: partial"))
+
+
+class TestG16AttacksOnAFix(Promoted):
+    """REF-31. On engagement 22 rows generated as attacks on a known issue's mitigation or fix
+    shared its root cause and were retired against it; other researchers then filed them. A row
+    whose claim is about an entry's fix, mitigation or bound ATTACKS the entry: it is tested,
+    never parked as a duplicate of it."""
+
+    HUMAN = "RJ: matches KI 3"
+
+    def scope_held(self) -> int:
+        import io, contextlib
+        self.err = io.StringIO()
+        with contextlib.redirect_stderr(self.err), contextlib.redirect_stdout(io.StringIO()):
+            return self.run_cli("promote", "--id", "R-6", "--to", "SCOPE-HELD", "--human", self.HUMAN)
+
+    def test_a_plain_known_issue_match_is_parked(self):
+        self.answer_residue(clause="issue", attacks_entry="no")
+        self.assertEqual(0, self.scope_held())
+        self.assertEqual("SCOPE-HELD", replay(self.eng)["R-6"]["status"])
+
+    def test_a_match_on_the_mitigation_fix_or_bound_is_refused(self):
+        for clause in ("mitigation", "fix", "bound"):
+            with self.subTest(clause=clause):
+                self.tier1()                   # a fresh sidecar each time
+                self.answer_residue(clause=clause, attacks_entry="no")
+                self.assertEqual(2, self.scope_held())
+                self.assertIn("G16", self.err.getvalue())
+                self.assertIn("TIER-1", self.err.getvalue())
+                self.assertEqual("TIER-1", replay(self.eng)["R-6"]["status"])
+
+    def test_a_row_generated_to_attack_the_entry_is_refused(self):
+        self.answer_residue(clause="issue", attacks_entry="yes")
+        self.assertEqual(2, self.scope_held())
+        self.assertIn("generated to attack", self.err.getvalue())
+
+    def test_new_promotions_must_answer_both(self):
+        for missing in ({"clause": None}, {"attacks_entry": None}):
+            with self.subTest(missing=missing):
+                self.tier1()
+                self.answer_residue(**missing)
+                self.assertEqual(2, self.scope_held())
+                self.assertIn("attacks_entry", self.err.getvalue())
+
+    def test_the_stop_backstop_is_silent_on_old_unanswered_sidecars(self):
+        """Sidecars written before REF-31 carry neither answer; the Stop hook must not fire on
+        them (one engagement alone has dozens), or it gets disabled. It still refuses where the
+        answers exist and say the row attacks the entry."""
+        import ledger_guard
+        rel = "ledger/dedup/R-6.md"
+        self.answer_residue(clause=None, attacks_entry=None)
+        self.assertEqual([], ledger_guard.check_g16("R-6", rel, self.eng))
+        self.assertTrue(ledger_guard.check_g16("R-6", rel, self.eng, require_answers=True))
+        p = self.eng / rel
+        p.write_text(p.read_text() + "clause: mitigation\nattacks_entry: no\n")
+        self.assertTrue(ledger_guard.check_g16("R-6", rel, self.eng))
+
+    def test_the_stop_backstop_calls_g16(self):
+        """Wiring, not the predicate: a sidecar edited after parking to say the row attacks the
+        entry's mitigation must surface at Stop. Fails if the state guard's call is removed."""
+        import ledger_state_guard as LSG
+        self.answer_residue(clause="issue", attacks_entry="no")
+        self.assertEqual(0, self.scope_held())
+        self.run_cli("render")
+        p = self.eng / "ledger" / "dedup" / "R-6.md"
+        p.write_text(p.read_text().replace("clause: issue", "clause: mitigation"))
+        self.assertTrue([m for _, m in LSG.state_violations(self.eng) if "G16" in m])
+
+    def test_yaml_booleans_are_read_as_answers(self):
+        """`attacks_entry: yes` loads as True in YAML; it must still count as yes."""
+        import ledger_guard
+        self.answer_residue(clause="issue", attacks_entry="yes")
+        self.assertTrue(ledger_guard.check_g16("R-6", "ledger/dedup/R-6.md", self.eng))
 
 
 class TestRenderIsGuardClean(Fixture):
@@ -1034,6 +1115,165 @@ class TestG14IsChargedAtPromote(Fixture):
         self.assertEqual(0, self.run_cli("promote", "--id", "R-6", "--to", "TIER-1",
                                          "--dedup", self.dedup()))
         self.assertEqual("TIER-1", replay(self.eng)["R-6"]["status"])
+
+
+class TestEveryReportAndEveryBody(Fixture):
+    """REF-31 (engagement 22): a second internal-audit round was never read, and a PARTIAL against the
+    known issues hid a full MATCH in it. At TIER-1 the CLI now refuses (a) while a prior-audit
+    report has no extract and key, where the engagement keeps 00-triage/prior-audit-index.md, and
+    (b) a PARTIAL or NO-MATCH that did not search EVERY finding-body file."""
+
+    BODY = TestG14IsChargedAtPromote.BODY
+
+    def bodies(self, *names):
+        d = self.eng / "00-triage" / "prior-audits-text"
+        d.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (d / f"{n}.txt").write_text(self.BODY)
+
+    def promote(self, result, searched, extra=""):
+        rel = self.sidecar("R-6", "searched:\n  - 00-triage/potential-risks/potential-risks.txt\n"
+                           + "".join(f"  - 00-triage/prior-audits-text/{s}.txt\n" for s in searched)
+                           + f"terms: [checkpoint, trace, sentinel]\nresult: {result}\n" + extra)
+        return self.run_cli("promote", "--id", "R-6", "--to", "TIER-1", "--dedup", rel)
+
+    def test_an_unread_report_refuses_tier1_where_the_index_exists(self):
+        self.header()
+        self.add()
+        (self.eng / "00-triage" / "prior-audit-index.md").write_text("# Prior-audit index\n")
+        self.bodies("hacken")
+        self.assertEqual(2, self.promote("NO-MATCH", ["hacken"]))       # hacken.pdf has no key
+        (self.eng / "00-triage" / "prior-audit-keys").mkdir(parents=True)
+        (self.eng / "00-triage" / "prior-audit-keys" / "hacken.json").write_text("{}")
+        self.assertEqual(0, self.promote("NO-MATCH", ["hacken"]))
+        self.assertEqual("TIER-1", replay(self.eng)["R-6"]["status"])
+
+    def test_without_the_index_unread_reports_do_not_refuse(self):
+        """Engagements created before 2026-10-19 keep no index and stay silent."""
+        self.header()
+        self.add()
+        self.assertEqual(0, self.promote("NO-MATCH", []))
+
+    def test_a_partial_or_no_match_must_search_every_body(self):
+        unmatched = "unmatched: the listed issue covers one user's read, not the aggregate case at all\n"
+        quote = f"quote: \"{REAL_QUOTE}\"\n"
+        for result, extra in (("NO-MATCH", ""), ("PARTIAL", quote + unmatched)):
+            with self.subTest(result=result):
+                self.tearDown(); self.setUp(); self.header(); self.add()
+                self.bodies("round1", "round2")
+                self.assertEqual(2, self.promote(result, ["round1"], extra))
+                self.assertEqual("UNTESTED", replay(self.eng)["R-6"]["status"])
+                self.assertEqual(0, self.promote(result, ["round1", "round2"], extra))
+
+    def test_a_folder_in_searched_covers_every_body_under_it(self):
+        self.header()
+        self.add()
+        self.bodies("round1", "round2")
+        rel = self.sidecar("R-6", "searched:\n  - 00-triage/potential-risks/potential-risks.txt\n"
+                           "  - 00-triage/prior-audits-text\n"
+                           "terms: [checkpoint, trace, sentinel]\nresult: NO-MATCH\n")
+        self.assertEqual(0, self.run_cli("promote", "--id", "R-6", "--to", "TIER-1", "--dedup", rel))
+
+    def test_the_stop_backstop_keeps_the_old_any_body_rule(self):
+        import ledger_guard
+        self.bodies("round1", "round2")
+        rel = self.sidecar("R-6", "searched:\n  - 00-triage/prior-audits-text/round1.txt\n"
+                           "terms: [a, b, c]\nresult: NO-MATCH\n")
+        self.assertEqual([], ledger_guard.check_g14("R-6", rel, self.eng))
+        self.assertTrue(ledger_guard.check_g14("R-6", rel, self.eng, every=True))
+
+
+class TestG17IsChargedAtPromote(Fixture):
+    """G17 (engagement 22): each function the row's entry names is searched on its own, by
+    the tool, and every hit in a source document is answered in `name_hits_read:`. Charged by the
+    CLI only, with the dedup obligation, so it never re-judges a row whose G1 is discharged."""
+
+    ENTRY = "`IPool.openPosition` by the pool owner, forwarded to `Registry.openPosition`"
+
+    def promote(self, terms, to="TIER-1", rid="AB-20", result="PARTIAL", answered=False, **flags):
+        """AB-20's own sidecar recorded PARTIAL. `answered` adds the README hit's answer."""
+        answer = ("name_hits_read:\n  - name: openPosition\n    file: target/README.md\n"
+                  "    note: \"describes the owner path, not the forwarded registry call\"\n"
+                  if answered else "")
+        rel = self.sidecar(rid, "searched:\n  - 00-triage/potential-risks/potential-risks.txt\n"
+                           f"terms: [{terms}]\nresult: {result}\nquote: \"{REAL_QUOTE}\"\n"
+                           "unmatched: the listed issue covers the owner path, not the forwarded "
+                           "registry call\nclause: issue\nattacks_entry: no\n" + answer)
+        argv = ["promote", "--id", rid, "--to", to, "--dedup", rel]
+        for k, v in flags.items():
+            argv += [f"--{k}", v]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = self.run_cli(*argv)
+        return code, err.getvalue()
+
+    def setUp(self):
+        super().setUp()
+        self.header()
+        self.run_cli("add", "--id", "AB-20", "--hypothesis", "owner picks a JIT lock period",
+                     "--entry", self.ENTRY)
+        (self.eng / "target").mkdir(exist_ok=True)
+        (self.eng / "target" / "README.md").write_text(
+            "Opening a position calls the pool's `openPosition`, which passes the initial "
+            "lock period explicitly.\n")
+
+    def test_the_ab_20_promotion_is_refused_and_the_row_does_not_move(self):
+        code, err = self.promote('"openPosition lockPeriod", "JIT lock", "owner-chosen lock"')
+        self.assertEqual(2, code)
+        self.assertIn("G17 [AB-20]", err)
+        self.assertIn("openPosition", err)
+        self.assertEqual("UNTESTED", replay(self.eng)["AB-20"]["status"])
+
+    def test_it_passes_once_the_readme_hit_is_answered(self):
+        code, err = self.promote('"openPosition lockPeriod", "JIT lock", "owner-chosen lock"',
+                                 answered=True)
+        self.assertEqual(0, code, err)
+        self.assertEqual("TIER-1", replay(self.eng)["AB-20"]["status"])
+
+    def test_listing_the_bare_name_as_a_term_does_not_discharge_it(self):
+        code, err = self.promote('"openPosition lockPeriod", "JIT lock", openPosition')
+        self.assertEqual(2, code)
+        self.assertIn("G17 [AB-20]", err)
+        self.assertIn("target/README.md:1", err)
+
+    def test_a_match_is_silent(self):
+        code, err = self.promote('"openPosition lockPeriod", "JIT lock", "owner-chosen lock"',
+                                 result="MATCH")
+        self.assertEqual(0, code, err)
+
+    def test_a_sidecar_cited_on_a_no_waypoint_exit_is_charged_too(self):
+        """UNTESTED -> SCOPE-HELD cites a sidecar without passing TIER-1, so G1 was never
+        discharged and this is the first time the sidecar is judged."""
+        code, err = self.promote('"openPosition lockPeriod", "JIT lock", "owner-chosen lock"',
+                                 to="SCOPE-HELD", human="RJ 2026-10-20: known issue K-29")
+        self.assertEqual(2, code)
+        self.assertIn("G17 [AB-20]", err)
+
+    def test_an_entry_with_no_identifier_is_silent(self):
+        self.run_cli("add", "--id", "R-9", "--hypothesis", "x", "--entry", "anyone, permissionless")
+        code, err = self.promote("checkpoint, trace, sentinel", rid="R-9")
+        self.assertEqual(0, code, err)
+
+    def test_a_row_whose_g1_was_discharged_before_the_rule_is_not_rejudged(self):
+        """The grandfathering. A row that reached TIER-1 with a phrase-only sidecar before G17
+        existed carries G1 in its satisfied set; promoting it onward must not re-open the dedup,
+        and neither verify nor the Stop-hook backstop may report it."""
+        import ledger_state_guard as LSG
+        rel = self.sidecar("AB-20", "searched:\n  - 00-triage/potential-risks/potential-risks.txt\n"
+                           "terms: [\"openPosition lockPeriod\", a, b]\nresult: NO-MATCH\n")
+        append(self.eng, {"id": "AB-20", "event": "promote", "to": "TIER-1", "dedup": rel,
+                          "satisfied": ["G1"], "by": "promoted-before-G17"})
+        cli.redraw(self.eng)
+        poc = self.poc("test/AB20.t.sol")
+        (self.eng / poc).write_text("contract T { function test_AB20() public {} }")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = self.run_cli("promote", "--id", "AB-20", "--to", "CONFIRMED",
+                                "--evidence", poc + "::test_AB20")
+        self.assertEqual(0, code, err.getvalue())
+        self.assertNotIn("G17", err.getvalue())
+        self.assertEqual(0, self.run_cli("verify"))
+        self.assertEqual([m for _, m in LSG.state_violations(self.eng) if "G17" in m], [])
 
 
 class TestVerifyWarnsOnMissingHeader(Fixture):
@@ -1269,6 +1509,137 @@ class TestCount(Fixture):
         self._count_output()
         after = events_path(self.eng).read_bytes()
         self.assertEqual(before, after)
+
+
+class TestExclusionQuotedAtPromote(Fixture):
+    """G20 (REF-32) is charged by `promote --to SCOPE-HELD --exclusion`; the predicate's table is in
+    tooling/guards/test_ledger_guard.py. This pins the wiring: a declared exclusion hold quotes the
+    list in --reason, an undeclared hold is not judged, and a MATCH sidecar exempts nothing."""
+
+    RULE = "Incorrect data supplied by third party oracles is out of scope"
+
+    def promote(self, rid, *extra) -> tuple[int, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self.run_cli("promote", "--id", rid, "--to", "SCOPE-HELD", "--human", "RJ: oracle rule",
+                              *extra)
+        return rc, err.getvalue()
+
+    def setUp(self):
+        super().setUp()
+        (self.eng / "00-triage" / "scope-exclusions.md").write_text(f"# Exclusions\n\n- {self.RULE}.\n")
+
+    def test_a_declared_exclusion_hold_must_quote_the_list(self):
+        self.add("R-1")
+        rc, err = self.promote("R-1", "--exclusion")
+        self.assertEqual((2, True), (rc, "G20" in err), err)
+        self.assertEqual(0, self.promote("R-1", "--exclusion", "--reason", f"brief: {self.RULE}")[0])
+
+    def test_an_undeclared_hold_is_not_judged(self):
+        self.add("R-2")
+        rc, err = self.promote("R-2")
+        self.assertEqual((0, False), (rc, "G20" in err), err)
+
+    def test_a_match_sidecar_exempts_nothing(self):
+        self.add("R-3")
+        rel = self.sidecar("R-3", "result: MATCH\nunmatched: none\nclause: issue\nattacks_entry: no\n")
+        rc, err = self.promote("R-3", "--exclusion", "--dedup", rel)
+        self.assertIn("G20", err)
+        self.assertEqual(2, rc)
+
+    def test_the_flag_means_nothing_off_scope_held(self):
+        self.add("R-4")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self.run_cli("promote", "--id", "R-4", "--to", "BLOCKED", "--exclusion",
+                              "--reason", "requires a mainnet fork we do not have")
+        self.assertEqual((2, True), (rc, "G20" in err.getvalue()))
+
+
+class TestKnownReview(Fixture):
+    """`known-review` (Richard, 2026-10-26): every row the matcher called KNOWN goes in front of the
+    human before Phase 5, on one page, with the row's claim, the entry's quote and the claims list.
+    A KNOWN row is ranked last and in practice never tested, so this page is the last look it gets.
+    A KNOWN row usually stays UNTESTED with no DEDUP pointer, so its sidecar is found at
+    ledger/dedup/<id>.md; a row whose promotion recorded a pointer is read through that."""
+
+    CALLER_QUOTE = "allows a caller to observe an inflated balance mid-transaction"
+
+    def known(self, rid: str, claims: str = "") -> None:
+        self.sidecar(rid, "searched:\n  - 00-triage/potential-risks/potential-risks.txt\n"
+                          "terms: [vault, shares, settle]\n"
+                          f"result: MATCH\nquote: \"{REAL_QUOTE}\"\n{claims}")
+
+    def setUp(self):
+        super().setUp()
+        self.add("R-1", "vault credits shares before settlement; a caller reads an inflated balance")
+        self.known("R-1", f"claims:\n  - caller: \"any caller mid-transaction\"\n"
+                          f"    quote: \"{self.CALLER_QUOTE}\"\n")
+        self.add("R-2", "a partial match")
+        self.sidecar("R-2", "result: PARTIAL\n")
+        self.add("R-3", "a new row")
+        self.sidecar("R-3", "result: NO-MATCH\n")
+        self.add("R-4", "a row with no sidecar")
+        self.add("R-5", "matched before the claims list existed")
+        self.known("R-5")
+        self.add("R-7", "a row whose promotion recorded its sidecar")
+        (self.eng / "ledger/dedup/R-7-known.md").write_text(
+            (self.eng / "ledger/dedup/R-5.md").read_text())
+        self.assertEqual(0, self.run_cli("promote", "--id", "R-7", "--to", "BLOCKED", "--dedup",
+                                         "ledger/dedup/R-7-known.md", "--reason",
+                                         "requires a mainnet fork we do not have"))
+
+    def page(self, *extra) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.run_cli("known-review", *extra)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_lists_every_match_row_and_nothing_else(self):
+        rc, out, _ = self.page()
+        self.assertEqual(0, rc)
+        self.assertEqual(["R-1", "R-5", "R-7"], re.findall(r"(?m)^## (\S+)", out))
+        self.assertIn("credits shares before settlement", out.split("## R-5")[0], "the row's claim")
+        self.assertEqual(3, out.count(REAL_QUOTE), "the entry's quote, once per row")
+        self.assertIn("caller: any caller mid-transaction", out)
+        self.assertIn(self.CALLER_QUOTE, out)
+        self.assertIn("no claims: list", out.split("## R-5")[1])
+
+    def test_says_which_rows_the_claims_check_would_refuse(self):
+        _, out, _ = self.page()
+        r1, r5 = out.split("## R-5")[0], out.split("## R-5")[1].split("## R-7")[0]
+        self.assertIn("claims check: passes", r1)
+        self.assertIn("claims check: FAILS", r5)
+
+    def test_records_an_answer_per_row(self):
+        self.assertEqual(0, self.page("--record", "R-1", "--answer", "agree: KNOWN")[0])
+        self.assertIn("R-1: agree: KNOWN", (self.eng / cli.KNOWN_REVIEW_FILE).read_text())
+        _, out, _ = self.page()
+        self.assertIn("reviewed: agree: KNOWN", out.split("## R-5")[0])
+        self.assertIn("not yet reviewed", out.split("## R-5")[1])
+
+    def test_refuses_an_answer_for_a_row_that_is_not_known_or_spans_lines(self):
+        for rid, answer in (("R-2", "agree"), ("R-9", "agree"), ("R-1", "agree\nR-5: agree"),
+                            ("R-1", "  ")):
+            with self.subTest(rid=rid, answer=answer):
+                rc, _, err = self.page("--record", rid, "--answer", answer)
+                self.assertEqual(2, rc)
+                self.assertTrue(err)
+        self.assertFalse((self.eng / cli.KNOWN_REVIEW_FILE).exists())
+
+    def test_an_unreadable_match_sidecar_is_listed_not_dropped(self):
+        """A load failure must not read as "not KNOWN": the page lists the row and says why."""
+        self.add("R-8", "a row whose sidecar no longer parses")
+        self.sidecar("R-8", "result: MATCH\nquote: \"unterminated\nclaims: [\n")
+        _, out, _ = self.page()
+        self.assertEqual(["R-1", "R-5", "R-7", "R-8"], re.findall(r"(?m)^## (\S+)", out))
+        self.assertIn("sidecar unreadable", out.split("## R-8")[1])
+
+    def test_printing_the_page_writes_nothing(self):
+        before = events_path(self.eng).read_bytes()
+        self.page()
+        self.assertEqual(before, events_path(self.eng).read_bytes())
+        self.assertFalse((self.eng / cli.KNOWN_REVIEW_FILE).exists())
 
 
 if __name__ == "__main__":
