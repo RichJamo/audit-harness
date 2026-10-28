@@ -18,7 +18,9 @@ import contextlib, importlib.util, io, shutil, sys, tempfile, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cli  # noqa: E402
+from table_cell import unescape_cell  # noqa: E402
 from store import append, replay, read_events, events_path, HEADER  # noqa: E402
 
 REAL_QUOTE = ("The vault accounting path credits shares before the transfer settles, "
@@ -621,6 +623,158 @@ class TestExistingRowsAreNotReJudged(Promoted):
         self.assertEqual(0, self.run_cli("verify"))
         self.assertEqual([m for _, m in LSG.state_violations(self.eng) if "REFUTED [" in m], [],
                          "the state guard must never re-judge a kill closed before the rule")
+
+
+class TestFreeTextSurvivesTheRender(Promoted):
+    """REF-30: a `|` or a newline in free text must not re-split or break the row.
+
+    A ledger row IS a markdown table line, so an unescaped `|` in a hypothesis or in a
+    prose kill reason adds cells: `import` then reads the wrong columns, and
+    `ledger_guard.field()` cuts the value off at that pipe -- while `verify` sees nothing
+    wrong, because it compares the board with a fresh render and the corruption
+    round-trips. Hypotheses written with absolute-value bars (`|U|`) have been split this
+    way on hand-written boards. Since REF-26 every REFUTED promotion carries a prose
+    `--reason`, and prose is where a pipe comes from.
+
+    The write half is `escape_cell` in `_render_parts`; the read half is `unescape_cell`
+    in `field()`. This is the test that pins them to each other.
+    """
+
+    # A hypothesis, an entry point and an invariant with pipes, then a kill reason with
+    # a pipe AND a newline -- every shape the fix has to survive, in one row.
+    HYP = "at most one live lock per user: `|{ i : locks[i].amount > 0 }| <= 1`"
+    ENTRY = "VaultQueue.withdraw | external | any holder"
+    INV = "|locks| is monotone under withdraw"
+    REASON = ("the search clamps the index before the read, so `|q - p|` stays 0 and the\n"
+              "wrong-value claim cannot hold; test_R6 pins it")
+    HUMAN = "RJ 2026-09-30: admin-gated | sponsor rule 4.2 | not our call"
+
+    RENDER_COLUMNS = 6                      # id | hypothesis | entry | invariant | status | evidence
+
+    def _row(self) -> str:
+        board = (self.eng / "ledger" / "ledger.md").read_text()
+        rows = [ln for ln in board.splitlines() if ln.startswith("| R-6 ")]
+        self.assertEqual(1, len(rows), f"R-6 is not exactly one line of the board:\n{board}")
+        return rows[0]
+
+    def _cells(self, row: str) -> list[str]:
+        return [c.strip() for c in row.strip().strip("|").split("|")]
+
+    def test_piped_free_text_round_trips_through_render_verify_and_field(self):
+        import ledger_guard
+        # `add` cannot be re-run for R-6 (rows are never recreated), so the piped
+        # hypothesis, entry and invariant go on a second row promoted the same way.
+        self.run_cli("add", "--id", "R-7", "--hypothesis", self.HYP,
+                     "--entry", self.ENTRY, "--invariant", self.INV)
+        self.tier1("R-7")
+        poc = self.eng / "test" / "R7.t.sol"
+        poc.parent.mkdir(parents=True, exist_ok=True)
+        poc.write_text("contract T { function test_R7() public {} }")
+        self.assertEqual(0, self.run_cli("promote", "--id", "R-7", "--to", "REFUTED",
+                                         "--evidence", "test/R7.t.sol::test_R7",
+                                         "--reason", self.REASON))
+        self.run_cli("render")
+
+        board = (self.eng / "ledger" / "ledger.md").read_text()
+        row = [ln for ln in board.splitlines() if ln.startswith("| R-7 ")]
+        self.assertEqual(1, len(row), f"R-7 is not exactly one line of the board:\n{board}")
+        cells = self._cells(row[0])
+        self.assertEqual(self.RENDER_COLUMNS, len(cells),
+                         f"free text re-split the row into {len(cells)} cells: {cells}")
+        self.assertEqual(0, self.run_cli("verify"))
+
+        # Each free-text value comes back as written, normalised ONLY in whitespace.
+        # The positional cells are read by position; the inline fields through field(),
+        # which is what every guard uses.
+        for name, written, read_back in (
+            # The positional cells have no reader of their own, so they are decoded here.
+            ("hypothesis", self.HYP, unescape_cell(cells[1])),
+            ("entry", self.ENTRY, unescape_cell(cells[2])),
+            ("invariant", self.INV, unescape_cell(cells[3])),
+            # field() decodes already -- that is the half under test.
+            ("REASON", self.REASON, ledger_guard.field(row[0], "REASON")),
+        ):
+            with self.subTest(name):
+                self.assertEqual(" ".join(written.split()), read_back)
+
+        # The EVENT LOG is the state, and it holds the prose the human typed -- pipes,
+        # newline and all -- never the transport encoding.
+        logged = replay(self.eng)["R-7"]["fields"]
+        self.assertEqual(self.REASON, logged["reason"])
+        self.assertEqual(self.HYP, logged["hypothesis"])
+
+    def test_a_piped_human_record_survives_the_state_guard(self):
+        """The same round trip on the other prose field, through the guard that runs at
+        `Stop` on every engagement -- not just through `verify`."""
+        import ledger_guard
+        import ledger_state_guard as LSG
+        self.answer_residue()
+        self.assertEqual(0, self.run_cli("promote", "--id", "R-6", "--to", "SCOPE-HELD",
+                                         "--human", self.HUMAN))
+        self.run_cli("render")
+        row = self._row()
+        self.assertEqual(self.RENDER_COLUMNS, len(self._cells(row)))
+        self.assertEqual(" ".join(self.HUMAN.split()), ledger_guard.field(row, "HUMAN"))
+        self.assertEqual([], [m for _, m in LSG.state_violations(self.eng) if "G2" in m],
+                         "a piped HUMAN record must still satisfy G2")
+
+    def test_an_imported_escaped_cell_is_stored_as_the_text_it_means(self):
+        """The generators (`conduct.py`, `fix-adjacency.py`, `opposite-tail.py`) escape on
+        their way into the table `import` reads. The log stores prose, so it decodes."""
+        src = self.eng / "01-hunt" / "rows.md"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("| id | hypothesis | entry point + access | invariant |\n"
+                       "|---|---|---|---|\n"
+                       "| FA-1 | `&#124;U&#124;` grows without bound | mint | none |\n")
+        self.assertEqual(0, self.run_cli("import", str(src)))
+        self.assertEqual("`|U|` grows without bound",
+                         replay(self.eng)["FA-1"]["fields"]["hypothesis"])
+        # and the board it re-renders is back to the escaped form, on one row of 6 cells
+        row = [ln for ln in (self.eng / "ledger" / "ledger.md").read_text().splitlines()
+               if ln.startswith("| FA-1 ")][0]
+        self.assertIn("`&#124;U&#124;`", row)
+        self.assertEqual(self.RENDER_COLUMNS, len(self._cells(row)))
+
+
+class TestPreFixRowsReadExactlyAsBefore(Promoted):
+    """REF-30's half of the main risk. `field()` now decodes `&#124;`, and it is the reader
+    the Stop-hook state guard uses on EVERY engagement on the machine -- so a decode that
+    changed what an existing value means would re-judge closed rows the moment the runtime
+    pulled it. What makes this safe is that a row written before the escape holds no
+    `&#124;`. These two cases pin the two ways that could stop being true.
+    """
+
+    # A row of the shape already on disk: a raw `|` inside the HUMAN value, no entity
+    # anywhere. Rows hand-written before the escape look like this.
+    PRE_FIX_ROW = ("| R-6 | at most one live lock per user | VaultQueue | monotone | "
+                   "`SCOPE-HELD` | HUMAN: RJ: sponsor rule 4.2 | out of scope |")
+
+    def test_a_raw_pipe_in_an_old_row_still_reads_the_way_it_always_did(self):
+        """The decode must be a NO-OP on text that never went through the escape. It does
+        not repair an old row -- `field()` still ends the value at the raw `|`, exactly as
+        it did before -- because repairing it would change what a closed row means."""
+        import ledger_guard
+        self.assertEqual("RJ: sponsor rule 4.2",
+                         ledger_guard.field(self.PRE_FIX_ROW, "HUMAN"))
+        self.assertNotIn("&#124;", self.PRE_FIX_ROW)
+
+    def test_a_row_with_no_pipes_renders_byte_identically(self):
+        """The other way it could break: the escape must not touch text without a pipe.
+        The expected line is written out in full, so a change to the encoding fails here
+        rather than silently rewriting every board on disk at the next `render`."""
+        import ledger_state_guard as LSG
+        self.assertEqual(0, self.run_cli("promote", "--id", "R-6", "--to", "REFUTED",
+                                         "--evidence", self.poc() + "::test_R6",
+                                         "--reason", "the clamp holds; test_R6 pins it"))
+        board = (self.eng / "ledger" / "ledger.md").read_text()
+        self.assertIn(
+            "| R-6 | Checkpoints.sol trace library returns a wrong value |  |  | "
+            "`REFUTED` | EVIDENCE: test/R6.t.sol::test_R6 \u00b7 DEDUP: ledger/dedup/R-6.md "
+            "\u00b7 REASON: the clamp holds; test_R6 pins it |",
+            board)
+        self.assertEqual(0, self.run_cli("verify"))
+        self.assertEqual([], [m for _, m in LSG.state_violations(self.eng)],
+                         "a plain row must raise nothing new")
 
 
 class TestScopeIsTheHumansCall(Promoted):
