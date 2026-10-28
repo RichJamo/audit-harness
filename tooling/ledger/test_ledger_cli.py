@@ -1276,6 +1276,191 @@ class TestG17IsChargedAtPromote(Fixture):
         self.assertEqual([m for _, m in LSG.state_violations(self.eng) if "G17" in m], [])
 
 
+class TestG18PrivilegedTestBeforeScopeHeld(Fixture):
+    """G18 (REF-33, engagement 23): a row naming a privileged action does not leave the work on a ruling
+    (SCOPE-HELD or BELOW-BAR) without the privileged-action test's verdict and real evidence. Silent
+    without a filled roles file."""
+
+    ROLES = ("# Privileged actors\n\n## Trusted roles\n\n| role | privileged functions | source (file:line) |\n"
+             "|---|---|---|\n| GUARDIAN | `setLtv` | contracts/PoolRoles.sol:12 |\n")
+    GOOD = "FAIL (c): the harm is the documented effect, src/Vault.sol:3"
+
+    def setUp(self):
+        super().setUp()
+        self.header()
+        (self.eng / "target" / "src").mkdir(parents=True)
+        (self.eng / "target" / "src" / "Vault.sol").write_text("// a\n// b\n/// pausing blocks this market only\n")
+        self.run_cli("add", "--id", "A-1", "--hypothesis", "GUARDIAN pauses one market and liquidations of "
+                     "unrelated collateral revert", "--entry", "anyone")
+        self.run_cli("add", "--id", "A-2", "--hypothesis", "rounding favours the borrower", "--entry", "anyone")
+
+    def roles(self, text=None):
+        d = self.eng / "01-scope"
+        d.mkdir(exist_ok=True)
+        (d / "privileged-actors.md").write_text(text or self.ROLES)
+
+    def hold(self, rid, *extra, to="SCOPE-HELD"):
+        err = io.StringIO()
+        ruling = ["--human", "RJ 2026-10-20: trusted role"] if to == "SCOPE-HELD" else \
+                 ["--reason", "program bar: admin actions are out of scope (rules p.2)"]
+        with contextlib.redirect_stderr(err):
+            code = self.run_cli("promote", "--id", rid, "--to", to, *ruling, *extra)
+        return code, err.getvalue()
+
+    def test_refused_without_the_test(self):
+        self.roles()
+        code, err = self.hold("A-1")
+        self.assertEqual(2, code)
+        self.assertIn("G18 [A-1]", err)
+        self.assertIn("GUARDIAN", err)
+        self.assertEqual("UNTESTED", replay(self.eng)["A-1"]["status"])
+
+    def test_the_verdict_must_lead_and_be_alone(self):
+        self.roles()
+        for value in ("FAIL", "the admin is trusted", "FAILED (c), src/Vault.sol:3", "PASSING src/Vault.sol:3",
+                      "NOT FAIL src/Vault.sol:3", "PASS or FAIL, src/Vault.sol:3"):
+            with self.subTest(value=value):
+                self.assertEqual(2, self.hold("A-1", "--privileged-test", value)[0])
+
+    def test_the_evidence_must_exist(self):
+        """Review of G18: any `a.b:1` once counted as a citation."""
+        self.roles()
+        notes = self.eng / "01-scope" / "privileged-actors.md"
+        for value in ("FAIL (c): Pool.sol:1", "FAIL (c): src/Vault.sol:99", "FAIL (c): e.g:1",
+                      'FAIL (c): "a quote that appears nowhere at all in this engagement"',
+                      f"FAIL (c): {notes.relative_to(self.eng)}:1"):
+            with self.subTest(value=value):
+                self.assertEqual(2, self.hold("A-1", "--privileged-test", value)[0])
+
+    def test_passes_with_a_real_citation_and_is_recorded(self):
+        self.roles()
+        code, err = self.hold("A-1", "--privileged-test", self.GOOD)
+        self.assertEqual(0, code, err)
+        promote = [e for e in replay(self.eng)["A-1"]["history"] if e["event"] == "promote"][-1]
+        self.assertIn("src/Vault.sol:3", promote["privileged_test"])
+
+    def test_evidence_is_checked_per_verdict_as_phase_4_defines_it(self):
+        """Richard, 2026-10-21. FAIL, the verdict that lets an admin row out, must cite the audited code or
+        the programme's own documents; NO-ACTION must quote the matched words from the row; the other
+        verdicts set nothing aside on admin grounds, so recording them is enough."""
+        self.roles()
+        triage = self.eng / "00-triage"
+        triage.mkdir(exist_ok=True)
+        (triage / "brief.md").write_text("# Brief\nThe guardian may pause any single market at will.\n")
+        cases = [
+            ("FAIL (c): src/Vault.sol:3", 0),                                  # audited code
+            ("FAIL (c): the brief says so, 00-triage/brief.md:2", 0),          # programme document
+            ('FAIL (c): "The guardian may pause any single market"', 0),        # quote from it
+            ('FAIL (c): "pauses one market and liquidations"', 2),              # the row itself: no
+            ('NO-ACTION: matched only "pauses one market and liquidations"', 0),  # quote of the row
+            ("NO-ACTION: the word is incidental", 2),                           # no quote
+            ('NO-ACTION: "a quote that is in no row at all here"', 2),          # not from the row
+        ]
+        for i, (value, want) in enumerate(cases):
+            rid = f"V-{i}"
+            self.run_cli("add", "--id", rid, "--hypothesis", "GUARDIAN pauses one market and liquidations of "
+                         "unrelated collateral revert", "--entry", "anyone")
+            with self.subTest(value=value):
+                self.assertEqual(want, self.hold(rid, "--privileged-test", value)[0])
+        for i, verdict in enumerate(("PASS", "UNCLEAR", "BOUND-CITED", "SEMI-TRUSTED")):
+            rid = f"W-{i}"
+            self.run_cli("add", "--id", rid, "--hypothesis", "GUARDIAN pauses again", "--entry", "anyone")
+            with self.subTest(verdict=verdict):
+                self.assertEqual(0, self.hold(rid, "--privileged-test", f"{verdict}: see the screen worklist")[0])
+        (self.eng / "notes.md").write_text("pausing one market is documented here at length\n")
+        self.assertEqual(2, self.hold("A-1", "--privileged-test",
+                                      'FAIL (c): "pausing one market is documented here"')[0])
+        self.run_cli("add", "--id", "A-3", "--hypothesis", "GUARDIAN pauses the market", "--entry", "anyone")
+        self.assertEqual(0, self.hold("A-3", "--privileged-test",
+                                      'FAIL (c): "pausing blocks this market only"')[0])
+
+    def test_a_no_action_quote_matches_the_row_as_screeners_write_it(self):
+        """Replay of engagement 21's 194 screen cells (2026-10-21): real NO-ACTION quotes drop the row's
+        backticks, skip words with "...", and are often just the matched words ("any borrower")."""
+        self.roles()
+        cases = [('NO-ACTION: quote: "During an outer Router.execute REBALANCE the GUARDIAN"', 0),
+                 ('NO-ACTION: quote: "During an outer ... GUARDIAN pauses"', 0),
+                 ('NO-ACTION: quote: "GUARDIAN pauses"', 0),
+                 ('NO-ACTION: quote: "the guardian pauses nothing"', 0),        # any case, as roles match
+                 ('NO-ACTION: matched "guardian" here; actor is "someone not in the row"', 0),  # two quotes
+                 ('NO-ACTION: quote: "GUARDIAN ... During"', 2)]     # the pieces must appear in order
+        for i, (value, want) in enumerate(cases):
+            rid = f"Q-{i}"
+            self.run_cli("add", "--id", rid, "--hypothesis", "During an outer `Router.execute` REBALANCE the "
+                         "GUARDIAN pauses nothing; any borrower can call it", "--entry", "anyone")
+            with self.subTest(value=value):
+                self.assertEqual(want, self.hold(rid, "--privileged-test", value)[0])
+
+    def test_auditor_written_and_test_code_is_not_audited_source(self):
+        """Review of the tightening (2026-10-21): a PoC comment, a target's own test or mock, and the
+        engagement's evidence folder are written or chosen by the auditor, so they prove nothing."""
+        self.roles()
+        for rel in ("poc/Note.t.sol", "target/test/Mock.sol", "target/tests/Helper.sol", "03-evidence/Probe.sol",
+                    "target/src/Vault.t.sol", "01-hunt/Probe.sol", "ledger/Probe.sol"):
+            f = self.eng / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("// the guardian pause here is documented and harmless\n")
+            with self.subTest(rel=rel):
+                self.assertEqual(2, self.hold("A-1", "--privileged-test", f"FAIL (c): {rel}:1")[0])
+                self.assertEqual(2, self.hold("A-1", "--privileged-test",
+                                              'FAIL (c): "the guardian pause here is documented and harmless"')[0])
+
+    def test_first_party_code_under_a_lib_folder_inside_src_counts(self):
+        """A project may keep in-scope code in src/core/lib/; only a dependency lib/ is skipped."""
+        self.roles()
+        f = self.eng / "target" / "src" / "lib" / "Ticks.sol"
+        f.parent.mkdir(parents=True)
+        f.write_text("// a\n// b\n")
+        self.assertEqual(0, self.hold("A-1", "--privileged-test", "FAIL (c): src/lib/Ticks.sol:2")[0])
+        (self.eng / "target" / "foundry.toml").write_text("[profile.default]\n")   # a dependency lib/ sits beside it
+        dep = self.eng / "target" / "lib" / "openzeppelin" / "Ownable.sol"
+        dep.parent.mkdir(parents=True)
+        dep.write_text("// a\n// b\n")
+        self.run_cli("add", "--id", "A-4", "--hypothesis", "GUARDIAN pauses again", "--entry", "anyone")
+        self.assertEqual(2, self.hold("A-4", "--privileged-test", "FAIL (c): lib/openzeppelin/Ownable.sol:2")[0])
+
+    def test_programme_documents_count_only_where_they_are_verbatim_copies(self):
+        """Found in review: chosen by folder name, a FAIL could cite the agent's own triage notes or a README
+        it wrote. Only the verbatim programme copies in 00-triage/, and the target repo's README and docs/."""
+        self.roles()
+        doc = "The guardian may pause any single market at its discretion.\n"
+        good = ["00-triage/brief.md", "00-triage/protocol-docs/trust.md", "00-triage/cantina-rules/rules.txt",
+                "00-triage/potential-risks/risk.txt", "target/README.md", "target/docs/roles.md"]
+        bad = ["00-triage/target-triage.md", "00-triage/scope-exclusions.md", "00-triage/README.md",
+               "01-hunt/README.md", "ledger/docs/why.md", "notes/docs/why.md"]
+        for i, rel in enumerate(good + bad):
+            f = self.eng / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("# x\n" + doc)
+            rid = f"P-{i}"
+            self.run_cli("add", "--id", rid, "--hypothesis", "GUARDIAN pauses one market", "--entry", "anyone")
+            with self.subTest(rel=rel):
+                self.assertEqual(0 if rel in good else 2, self.hold(rid, "--privileged-test", f"FAIL (c): {rel}:2")[0])
+            f.unlink()
+
+    def test_a_line_past_the_end_of_the_file_is_refused(self):
+        self.roles()   # target/src/Vault.sol has 3 lines and ends in a newline
+        self.assertEqual(2, self.hold("A-1", "--privileged-test", "FAIL (c): src/Vault.sol:4")[0])
+
+    def test_below_bar_is_covered_too(self):
+        self.roles()
+        self.assertEqual(2, self.hold("A-1", to="BELOW-BAR")[0])
+        self.assertEqual(0, self.hold("A-1", "--privileged-test", self.GOOD, to="BELOW-BAR")[0])
+
+    def test_silent_for_rows_naming_no_privileged_action(self):
+        self.roles()
+        self.assertEqual(0, self.hold("A-2")[0])
+
+    def test_silent_without_a_filled_roles_file(self):
+        """Engagements before the file existed, and any engagement before Phase 0 writes it."""
+        self.assertEqual(0, self.hold("A-1")[0])
+
+    def test_silent_with_the_unfilled_template(self):
+        template = (Path(__file__).resolve().parents[2] / "templates" / "privileged-actors.template.md").read_text()
+        self.roles(template)
+        self.assertEqual(0, self.hold("A-1")[0])
+
+
 class TestVerifyWarnsOnMissingHeader(Fixture):
     """REF-23's other half: render composes a hand-written ledger/HEADER.md instead of
     destroying it (PR #67), but an engagement that never wrote one gets no signal that

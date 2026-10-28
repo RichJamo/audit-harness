@@ -61,6 +61,13 @@ INDEX
 
 cp "$TOOLKIT/templates/ledger.template.md" "$ROOT/ledger/ledger.md"
 
+# REF-33 (backlog): the trusted roles and their privileged functions, filled in per target from its
+# access-control code. G18 reads it (tooling/privileged_actors.py) to find the rows that need a
+# trusted role to act, so they are judged by clause rather than set aside as "admin action".
+mkdir -p "$ROOT/01-scope"
+[ -e "$ROOT/01-scope/privileged-actors.md" ] ||
+  cp "$TOOLKIT/templates/privileged-actors.template.md" "$ROOT/01-scope/privileged-actors.md"
+
 # REF-17: record which version of the skill this engagement ran. Stamped here, never typed by
 # the model, and read from the toolkit THIS script lives in -- the runtime every engagement
 # resolves by absolute path -- so it names the phase files that were actually in force. Not a
@@ -133,6 +140,7 @@ printf '  %s\n' \
   "ledger/HEADER.md           <- FILL THIS FIRST: impact bar, materiality, RUN/CUTOFF (the first TIER-1 promotion is refused until it is complete)" \
   "ledger/ledger.md           <- from templates/ledger.template.md, format declared; GENERATED once the CLI writes" \
   "ledger/dedup/              <- one DEDUP: sidecar per row entering TIER-1" \
+  "01-scope/privileged-actors.md <- trusted roles from the access-control code, cited (G18)" \
   "poc/                       <- harnesses (G1b blocks these until a row is TIER-1)" \
   "02-static/                 <- Slither / Aderyn / clippy output"
 
