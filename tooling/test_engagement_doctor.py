@@ -368,6 +368,22 @@ class TestGeneratedRowsUnimported(Base):
         self.ledger("| id | hypothesis | status |\n|---|---|---|\n| H1 | a | UNTESTED |\n")
         self.assertEqual([], self.rows())
 
+    def test_warnings_in_a_rows_file_are_a_gap_and_silence_otherwise(self):
+        """fix-adjacency writes its warnings into the rows file (an HTML comment in `.md`, a
+        `warnings` list in `.json`), so they are seen without anyone watching its stderr."""
+        self.hunt("fix-adjacency.rows.md", "| id | hypothesis |\n|---|---|\n| FA-1 | a |\n")
+        self.hunt("opposite-tail.rows.json", '{"rows": []}')
+        self.assertEqual([], doctor.check_generator_warnings(self.eng))
+        self.hunt("fix-adjacency.rows.md", "<!-- fix-adjacency warning: report.txt: 2 finding(s) say they "
+                                           "were fixed -->\n| id | hypothesis |\n|---|---|\n| FA-1 | a |\n")
+        self.hunt("fix-adjacency.rows.json", '{"warnings": ["1 of 3 fix claim(s) found no heading"], "rows": []}')
+        rows = doctor.check_generator_warnings(self.eng)
+        self.assertEqual([GAP], [lvl for lvl, _, _ in rows])
+        self.assertIn("2 generator warning(s)", rows[0][1])
+        self.assertIn("fix-adjacency.rows.json", rows[0][1])
+        self.assertIn("fix-adjacency.rows.md", rows[0][1])
+        self.assertIn(rows[0], doctor.check(self.eng), "check() never runs check_generator_warnings")
+
     def test_fix_adjacency_shape_with_nothing_imported(self):
         """The real engagement 18 failure, minus the row count: fix-adjacency's own
         {claims, functions_indexed, rows} shape, no `id` field on any row."""
@@ -544,10 +560,11 @@ class TestPocEmpty(Base):
 
 
 class TestUntestedAtCloseout(Base):
-    """REF-22's full form (decided 2026-09-24): once an engagement reaches close-out --
-    a submissions/ directory, or any CONFIRMED row -- every row still UNTESTED was closed
-    by argument, not by one of the four legitimate exits. Before close-out this must stay
-    silent: Phases 1-2 generate wide and every fresh row lands UNTESTED by design."""
+    """REF-22's full form: once an engagement has declared close-out -- PHASES.md records
+    Phase 5, done or skipped (Rich, 2026-10-21) -- every row still UNTESTED was closed by
+    argument, not by one of the four legitimate exits. Before that this must stay silent:
+    Phases 1-2 generate wide and every fresh row lands UNTESTED by design, and a
+    submissions/ directory or a CONFIRMED row is routine mid-hunt."""
 
     def ledger(self, text: str) -> None:
         write(self.eng / "ledger" / "ledger.md", text)
@@ -562,23 +579,30 @@ class TestUntestedAtCloseout(Base):
     ALL_CLOSED = ("| id | hypothesis | status |\n|---|---|---|\n"
                   "| H1 | a | REFUTED |\n| H2 | b | CONFIRMED |\n")
 
-    # (name, submissions/ present, ledger text, expected to fire)
+    # (name, submissions/ present, PHASES.md text or None, ledger text, expected to fire)
     CASES = [
-        ("no submissions/, no CONFIRMED -- silent", False, UNTESTED_AND_REFUTED, False),
-        ("submissions/ present with an UNTESTED row -- fires, names the id",
-         True, UNTESTED_AND_REFUTED, True),
-        ("a CONFIRMED row present with an UNTESTED row -- fires",
-         False, UNTESTED_AND_CONFIRMED, True),
-        ("past close-out with zero UNTESTED -- silent", True, ALL_CLOSED, False),
+        ("no PHASES.md, no submissions/ -- silent",
+         False, None, UNTESTED_AND_REFUTED, False),
+        ("submissions/ with no Phase 5 line -- silent", True, None, UNTESTED_AND_REFUTED, False),
+        ("a CONFIRMED row with no Phase 5 line -- silent",
+         False, "Phase 4: done\n", UNTESTED_AND_CONFIRMED, False),
+        ("Phase 5 done with an UNTESTED row -- fires, names the id",
+         False, "Phase 5: done\n", UNTESTED_AND_REFUTED, True),
+        ("Phase 5 skipped with an UNTESTED row -- fires",
+         False, "Phase 5: skipped -- no submission\n", UNTESTED_AND_REFUTED, True),
+        ("Phase 5 done with zero UNTESTED -- silent", False, "Phase 5: done\n", ALL_CLOSED, False),
     ]
 
-    def test_close_out_boundary_and_untested_rows(self):
-        for name, has_submissions, ledger_text, expect_fires in self.CASES:
+    def test_declared_close_out_and_untested_rows(self):
+        for name, has_submissions, phases_text, ledger_text, expect_fires in self.CASES:
             with self.subTest(case=name):
                 submissions = self.eng / "submissions"
                 shutil.rmtree(submissions, ignore_errors=True)
+                (self.eng / "PHASES.md").unlink(missing_ok=True)
                 if has_submissions:
                     submissions.mkdir()
+                if phases_text is not None:
+                    write(self.eng / "PHASES.md", phases_text)
                 self.ledger(ledger_text)
                 rows = self.rows()
                 if expect_fires:
@@ -589,7 +613,7 @@ class TestUntestedAtCloseout(Base):
                     self.assertEqual([], rows)
 
     def test_an_empty_ledger_is_silent_even_past_close_out(self):
-        (self.eng / "submissions").mkdir()
+        write(self.eng / "PHASES.md", "Phase 5: done\n")
         self.assertEqual([], self.rows())
 
     def test_the_same_id_in_two_ledger_files_is_not_silently_merged(self):
@@ -602,7 +626,7 @@ class TestUntestedAtCloseout(Base):
               "| id | hypothesis | status |\n|---|---|---|\n| H1 | a | UNTESTED |\n")
         write(self.eng / "ledger" / "b.md",
               "| id | hypothesis | status |\n|---|---|---|\n| H1 | a | SCOPE-HELD |\n")
-        (self.eng / "submissions").mkdir()
+        write(self.eng / "PHASES.md", "Phase 5: done\n")
         rows = self.rows()
         self.assertEqual([GAP], [r[0] for r in rows])
         self.assertIn("a.md:H1", rows[0][1])
@@ -615,10 +639,259 @@ class TestUntestedAtCloseout(Base):
         not just the bare function, so a future refactor that moves the call back inside
         `if docs:` fails a test instead of passing silently."""
         self.ledger(self.UNTESTED_AND_CONFIRMED)
+        write(self.eng / "PHASES.md", "Phase 5: done\n")
         results = doctor.check(self.eng, docs=False)
         gaps = [r for r in results if r[0] == doctor.GAP and "UNTESTED past close-out" in r[1]]
         self.assertEqual(1, len(gaps))
         self.assertIn("H1", gaps[0][1])
+
+
+class TestScopeExclusionsFile(Base):
+    """Richard, 2026-10-26: exclusion quoting (G20) reads 00-triage/scope-exclusions.md and is silent
+    where it is missing, so the doctor says when an engagement that records Phase 0 has none. Engagements
+    from before phases were recorded stay silent: they record no Phase 0."""
+
+    def test_the_table(self):
+        # (case, PHASES.md text or None, exclusion file present, fires)
+        for case, phases, present, fires in [
+            ("no PHASES.md: an older engagement, silent", None, False, False),
+            ("Phase 0 recorded and no exclusion file: fires", "Phase 0: done\n", False, True),
+            ("Phase 0 skipped and no exclusion file: fires", "Phase 0: skipped -- x\n", False, True),
+            ("Phase 0 recorded with the file: silent", "Phase 0: done\n", True, False),
+            ("only Phase -1 recorded: silent until Phase 0", "Phase -1: done\n", False, False),
+        ]:
+            with self.subTest(case=case):
+                (self.eng / "PHASES.md").unlink(missing_ok=True)
+                (self.eng / "00-triage" / "scope-exclusions.md").unlink(missing_ok=True)
+                if phases is not None:
+                    write(self.eng / "PHASES.md", phases)
+                if present:
+                    write(self.eng / "00-triage" / "scope-exclusions.md", "- front-running is out of scope\n")
+                rows = doctor.check_scope_exclusions_file(self.eng)
+                self.assertEqual([GAP] if fires else [], [r[0] for r in rows])
+                if fires:
+                    self.assertIn("scope-exclusions.md", rows[0][1])
+
+
+class TestKnownUnreviewedAtCloseout(Base):
+    """Richard, 2026-10-26: every row the matcher called KNOWN goes in front of him before Phase 5
+    (`cli.py known-review`), and his answer is recorded per row. A KNOWN row is ranked last and in
+    practice never tested, so once close-out is declared an unreviewed one is a finding nobody
+    looked at again. Silent before Phase 5 is recorded, as the UNTESTED-at-close-out check is."""
+
+    LEDGER = ("| id | hypothesis | status | evidence |\n|---|---|---|---|\n"
+              "| H1 | a | UNTESTED | |\n| H2 | b | UNTESTED | |\n| H3 | c | REFUTED | |\n")
+
+    def setUp(self):
+        super().setUp()
+        write(self.eng / "ledger" / "ledger.md", self.LEDGER)
+        for rid, result in (("H1", "MATCH"), ("H2", "MATCH"), ("H3", "PARTIAL")):
+            write(self.eng / "ledger" / "dedup" / f"{rid}.md", f"result: {result}\n")
+
+    # (case, PHASES.md text or None, review file text or None, ids expected in the GAP, or None)
+    CASES = [
+        ("no PHASES.md -- silent", None, None, None),
+        ("Phase 4 done only -- silent", "Phase 4: done\n", None, None),
+        ("Phase 5 done, none reviewed -- fires on both KNOWN rows",
+         "Phase 5: done\n", None, ["H1", "H2"]),
+        ("Phase 5 skipped, one reviewed -- fires on the other",
+         "Phase 5: skipped -- no submission\n", "H1: agree, KNOWN\n", ["H2"]),
+        ("Phase 5 done, every KNOWN row reviewed -- silent",
+         "Phase 5: done\n", "H1: agree\nH2: test it, PARTIAL on the keeper caller\n", None),
+    ]
+
+    def test_unreviewed_known_rows_after_close_out(self):
+        for case, phases, review, expected in self.CASES:
+            with self.subTest(case=case):
+                (self.eng / "PHASES.md").unlink(missing_ok=True)
+                (self.eng / "03-evidence" / "known-review.md").unlink(missing_ok=True)
+                if phases is not None:
+                    write(self.eng / "PHASES.md", phases)
+                if review is not None:
+                    write(self.eng / "03-evidence" / "known-review.md", review)
+                rows = doctor.check_known_unreviewed(self.eng)
+                if expected is None:
+                    self.assertEqual([], rows)
+                    continue
+                self.assertEqual([GAP], [r[0] for r in rows])
+                self.assertIn(f"{len(expected)} KNOWN row(s)", rows[0][1])
+                for rid in ("H1", "H2", "H3"):
+                    (self.assertIn if rid in expected else self.assertNotIn)(rid, rows[0][1])
+
+    def test_fires_through_check_even_with_docs_false(self):
+        """A closed engagement is normally the least recently active one, which --all checks
+        with docs=False, so this sits outside check()'s `if docs:` block like REF-22's check."""
+        write(self.eng / "PHASES.md", "Phase 5: done\n")
+        gaps = [r for r in doctor.check(self.eng, docs=False) if "KNOWN row(s)" in r[1]]
+        self.assertEqual([GAP], [r[0] for r in gaps])
+
+
+class TestUntestedRowsWithTests(Base):
+    """Engagement 22, 2026-10-20: two priority-1 rows had been tested a day earlier but still
+    read UNTESTED, so a later screen re-queued them. The check flags an UNTESTED row only when
+    a PoC test file names it DEFINITELY. The comment lines below keep the naming forms of that
+    engagement's PoC comments, where the check flagged exactly the expected rows and none of the
+    passing mentions; the ids and the descriptive words are replaced."""
+
+    # Every id that appears in a fixture below, all UNTESTED.
+    IDS = ["PAD-10", "HX-8", "RQ-14", "RQ-15", "S4H1-10", "S2H1-9", "S2H1-10", "S2H2-2",
+           "S4H1-7", "HX-16", "HX-30", "S1H1-2", "PAD-1", "PAD-2", "S3H2-17", "S3H1-20",
+           "S1H1-25", "OT-4", "OT-13", "S8H1-14", "A-2", "HX-27"]
+
+    # (file name under poc/tests/, comment line) -- the naming forms of engagement 22's PoC comments.
+    FILES = [
+        ("H3-PAD-10.t.sol", "// Final-pass hunt H3, ledger row PAD-10 (rounding probe ...)"),
+        ("B4-HX-8.t.sol", "// Second pass, part 2 (batch 4 rows). "
+                           "Ledger row HX-8 (cluster HX-8)."),
+        ("H1-queue.t.sol", "// Final-pass hunt H1 (queue ordering) for ledger rows "
+                               "RQ-14 and RQ-15 (cluster S4H1-10)"),
+        ("S2H2-1.t.sol", "// Representative for S2H1-9, S2H1-10, S2H2-2."),
+        ("HOT-E1.t.sol", "// Final-pass evidence test HOT-E1 (backs existing ledger row "
+                         "S4H1-7; not a new row)"),
+        ("H3-HX-16.t.sol", "// HX-16 (PRIOR)."),
+        ("Cost.t.sol", "// also gives the cost asked about by HX-30."),
+        ("Fork.t.sol", "// PoC for ledger row S1H1-2 (cluster: PAD-1, PAD-2). FORK test"),
+        ("Cluster.t.sol", "// (cluster S3H2-17); also bears on S3H1-20, S1H1-25, OT-4, OT-13."),
+        ("Prior.t.sol", "// Prior-art: whether the owner role HAS a delay is "
+                        "S8H1-14 (PRIOR)."),
+        ("ESC-A-2.t.sol", "// escalation test"),
+        ("MP1-HX-27.t.sol", "// no naming comment; the file name is the evidence"),
+    ]
+    EXPECTED = {"PAD-10", "HX-8", "RQ-14", "RQ-15", "S2H1-9", "S2H1-10", "S2H2-2", "S4H1-7",
+                "HX-16", "S1H1-2", "HX-27"}
+    PASSING_MENTIONS = {"S4H1-10", "HX-30", "PAD-1", "PAD-2", "S3H2-17", "S3H1-20",
+                        "S1H1-25", "OT-4", "OT-13", "S8H1-14", "A-2"}
+
+    def ledger(self, statuses: dict[str, str]) -> None:
+        body = "".join(f"| {rid} | h | {st} |\n" for rid, st in statuses.items())
+        write(self.eng / "ledger" / "ledger.md", "| id | hypothesis | status |\n|---|---|---|\n" + body)
+
+    def poc(self, name: str, text: str) -> None:
+        write(self.eng / "poc" / "tests" / name, text + "\ncontract T {}\n")
+
+    def rows(self):
+        return doctor.check_untested_rows_with_tests(self.eng)
+
+    def flagged(self) -> set[str]:
+        rows = self.rows()
+        if not rows:
+            return set()
+        self.assertEqual([WARN], [r[0] for r in rows])
+        listed = rows[0][1].split(": ", 1)[1]
+        return {item.split(" (")[0] for item in listed.split(", ")}
+
+    def test_regression_on_real_comment_forms(self):
+        self.ledger({rid: "UNTESTED" for rid in self.IDS})
+        for name, text in self.FILES:
+            self.poc(name, text)
+        flagged = self.flagged()
+        self.assertEqual(self.EXPECTED, flagged)
+        self.assertFalse(flagged & self.PASSING_MENTIONS)
+        self.assertIn(f"{len(self.EXPECTED)} UNTESTED row(s) already named by a test file",
+                      self.rows()[0][1])
+        self.assertIn("RQ-14 (H1-queue.t.sol)", self.rows()[0][1])
+
+    def test_rows_no_longer_untested_are_not_flagged(self):
+        """The check reads the status cell: a row the test already promoted is not stale."""
+        self.ledger({"PAD-10": "REFUTED", "HX-8": "CONFIRMED"})
+        self.poc("H3-PAD-10.t.sol", self.FILES[0][1])
+        self.poc("B4-HX-8.t.sol", self.FILES[1][1])
+        self.assertEqual([], self.rows())
+
+    def test_silent_with_no_poc_files(self):
+        self.ledger({"PAD-10": "UNTESTED"})
+        self.assertEqual([], self.rows())
+
+    def test_silent_with_no_ledger(self):
+        self.poc("H3-PAD-10.t.sol", self.FILES[0][1])
+        self.assertEqual([], self.rows())
+
+    def test_dependency_trees_are_not_read(self):
+        """forge-std and friends live under poc/lib; nothing there names our rows."""
+        self.ledger({"PAD-10": "UNTESTED"})
+        write(self.eng / "poc" / "lib" / "forge-std" / "PAD-10.t.sol", "contract T {}")
+        self.assertEqual([], self.rows())
+
+    def test_test_poc_dir_and_other_languages_are_read(self):
+        self.ledger({"PAD-10": "UNTESTED", "HX-8": "UNTESTED"})
+        write(self.eng / "test" / "poc" / "pad_test.go", "// ledger row PAD-10\n")
+        write(self.eng / "poc" / "src" / "lib.rs", "// Representative for HX-8.\n")
+        self.assertEqual({"PAD-10", "HX-8"}, self.flagged())
+
+    def test_advisory_through_check(self):
+        """Wired into check() and never at a failing level: an advisory must not block a run."""
+        self.ledger({"PAD-10": "UNTESTED"})
+        self.poc("H3-PAD-10.t.sol", self.FILES[0][1])
+        hits = [r for r in doctor.check(self.eng) if "already named by a test file" in r[1]]
+        self.assertEqual([WARN], [r[0] for r in hits])
+
+
+class TestQueuesComplete(Base):
+    """Engagement 22: RQ-14 fell through every work queue. When 03-evidence/queues.md
+    exists, every UNTESTED row must appear in it exactly once."""
+
+    LEDGER = ("| id | hypothesis | status |\n|---|---|---|\n"
+              "| H1 | a | UNTESTED |\n| H2 | b | UNTESTED |\n| H3 | c | REFUTED |\n")
+
+    def setUp(self):
+        super().setUp()
+        write(self.eng / "ledger" / "ledger.md", self.LEDGER)
+
+    def queues(self, *rows: str) -> None:
+        body = "".join(f"| {rid} | queue-{i} |\n" for i, rid in enumerate(rows))
+        write(self.eng / "03-evidence" / "queues.md",
+              "Queues note.\n\n| row | queue |\n|---|---|\n" + body)
+
+    def rows(self):
+        return doctor.check_queues_complete(self.eng)
+
+    def test_no_queues_file_is_silent(self):
+        self.assertEqual([], self.rows())
+
+    def test_clean_queues_is_silent(self):
+        self.queues("H1", "H2")
+        self.assertEqual([], self.rows())
+
+    def test_a_missing_untested_row_is_a_gap(self):
+        self.queues("H1")
+        rows = self.rows()
+        self.assertEqual([GAP], [r[0] for r in rows])
+        self.assertIn("1 UNTESTED row(s) missing: H2", rows[0][1])
+
+    def test_a_row_listed_twice_is_a_gap(self):
+        self.queues("H1", "H2", "H1")
+        rows = self.rows()
+        self.assertEqual([GAP], [r[0] for r in rows])
+        self.assertIn("listed more than once: H1", rows[0][1])
+        self.assertNotIn("missing", rows[0][1])
+
+    def test_a_row_no_longer_untested_is_a_warn(self):
+        self.queues("H1", "H2", "H3")
+        rows = self.rows()
+        self.assertEqual([WARN], [r[0] for r in rows])
+        self.assertIn("no longer UNTESTED: H3", rows[0][1])
+
+    def test_missing_and_stale_together_give_one_of_each(self):
+        self.queues("H1", "H3")
+        self.assertEqual([GAP, WARN], [r[0] for r in self.rows()])
+
+    def test_queues_file_is_not_read_as_a_ledger(self):
+        """Its status-less rows must not trip the statusless-row or pre-migration checks."""
+        self.queues("H1", "H2")
+        write(self.eng / "ledger" / "events.jsonl", '{"event":"created","id":"H1"}\n')
+        self.assertEqual([], doctor.check_statusless_rows(self.eng))
+        self.assertEqual([OK], [r[0] for r in doctor.check_ledger_is_cli_managed(self.eng)])
+
+    def test_template_parses_as_an_empty_queues_table(self):
+        template = Path(__file__).resolve().parent.parent / "templates" / "queues.template.md"
+        text = template.read_text()
+        self.assertIn("| row | queue |", text)
+        self.assertEqual([], doctor.queue_entries(text))
+
+    def test_wired_into_check(self):
+        self.queues("H1")
+        self.assertTrue(any(r[0] == GAP and "queues.md is incomplete" in r[1]
+                            for r in doctor.check(self.eng)))
 
 
 class TestPhasesRecorded(Base):
@@ -703,6 +976,73 @@ class TestPhasesRecorded(Base):
     def test_never_claims_a_guard_will_block(self):
         self.ledger(self.ONE_ROW)
         self.assertNotIn(doctor.BAD, [r[0] for r in self.rows()])
+
+
+class TestShadowCandidateRecorded(Base):
+    """Phase -1's shadow-audit candidate check (skill/phases/phase-m1-triage.md): once Phase -1 is
+    done and a prior-audit report is on disk, the triage file must record whether the report's
+    audited commits are reachable."""
+
+    SECTION = "## Shadow-audit candidate check\nNot a candidate: commits are private.\n"
+
+    def phases(self, text: str = "Phase -1: done\n") -> None:
+        write(self.eng / "PHASES.md", text)
+
+    def report(self) -> None:
+        write(self.eng / "00-triage/prior-audits/hacken.pdf", "%PDF")
+
+    def triage(self, text: str) -> None:
+        write(self.eng / "00-triage/target-triage.md", "# Phase -1 target triage\n" + text)
+
+    def rows(self):
+        return doctor.check_shadow_candidate_recorded(self.eng)
+
+    def test_missing_section_is_a_gap(self):
+        self.phases(); self.report(); self.triage("## EV verdict\nLow.\n")
+        rows = self.rows()
+        self.assertEqual([GAP], [r[0] for r in rows])
+        self.assertIn("shadow-audit candidate check", rows[0][1])
+
+    def test_missing_triage_file_is_a_gap(self):
+        self.phases(); self.report()
+        self.assertEqual([GAP], [r[0] for r in self.rows()])
+
+    def test_recorded_section_is_silent(self):
+        self.phases(); self.report(); self.triage(self.SECTION)
+        self.assertEqual([], self.rows())
+
+    def test_heading_match_ignores_case_and_level(self):
+        self.phases(); self.report()
+        self.triage("### shadow-audit candidate check (added later)\nNothing reachable.\n")
+        self.assertEqual([], self.rows())
+
+    def test_heading_text_in_prose_does_not_count(self):
+        """Only a heading counts: a sentence mentioning the check is not the recorded result."""
+        self.phases(); self.report()
+        self.triage("We still owe the Shadow-audit candidate check.\n")
+        self.assertEqual([GAP], [r[0] for r in self.rows()])
+
+    def test_phase_m1_skipped_is_silent(self):
+        """A shadow audit skips Phase -1; it is the shadow audit."""
+        self.phases("Phase -1: skipped -- assigned shadow audit\n"); self.report()
+        self.assertEqual([], self.rows())
+
+    def test_phase_m1_not_recorded_is_silent(self):
+        self.report()
+        self.assertEqual([], self.rows())
+
+    def test_no_report_is_silent(self):
+        self.phases()
+        write(self.eng / "00-triage/prior-audits/.DS_Store")
+        self.assertEqual([], self.rows())
+
+    def test_never_claims_a_guard_will_block(self):
+        self.phases(); self.report()
+        self.assertNotIn(BAD, [r[0] for r in self.rows()])
+
+    def test_wired_into_check(self):
+        self.phases(); self.report()
+        self.assertTrue(any("shadow-audit candidate check" in r[1] for r in doctor.check(self.eng)))
 
 
 class TestLedgerHeader(Base):
@@ -800,6 +1140,25 @@ class TestLedgerHeader(Base):
     def test_it_claims_a_guard_will_block(self):
         self.ledger(self.ONE_ROW)
         self.assertIn(doctor.BAD, [r[0] for r in self.rows()])
+
+
+class TestPriorCorpus(Base):
+    """REF-31: BAD (a guard refuses TIER-1) while a prior-audit report has no extract and key,
+    where the engagement keeps 00-triage/prior-audit-index.md; silent where it does not."""
+
+    def test_silent_without_the_index(self):
+        write(self.eng / "00-triage/prior-audits/hacken.pdf")
+        self.assertEqual(doctor.check_prior_corpus(self.eng), [])
+
+    def test_bad_and_named_with_the_index(self):
+        write(self.eng / "00-triage/prior-audit-index.md", "# index\n")
+        write(self.eng / "00-triage/prior-audits/internal/audit/F1.md")
+        write(self.eng / "00-triage/prior-audits/internal/audit/v2/F1.md")
+        rows = doctor.check_prior_corpus(self.eng)
+        self.assertEqual([r[0] for r in rows], [BAD])
+        self.assertIn("2 prior-audit report file(s)", rows[0][1])
+        self.assertIn("internal/audit/v2", rows[0][2])
+        self.assertIn("blocks every TIER-1", rows[0][2])
 
 
 if __name__ == "__main__":

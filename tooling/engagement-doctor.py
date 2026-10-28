@@ -28,9 +28,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "guards"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from table_cell import unescape_cell  # noqa: E402
+from poc_mentions import (  # noqa: E402  (filename_names_row, rows_named_in_line: used by tests)
+    DEPENDENCY_DIRS, filename_names_row, files_naming_rows, rows_named_in_line,
+)
 from ledger_guard import (  # noqa: E402
     FORMAT_MARKER, engagement_ledgers, parse_rows, parse_row_lines, finding_body_files,
-    load_sidecar, as_list, header_missing_fields, row_status,
+    load_sidecar, as_list, header_missing_fields, row_status, ROW_ID,
+    KNOWN_REVIEW_FILE, known_rows, known_reviews,
 )
 
 # GAP sits between WARN and BAD: it fails the run (exit 2) but is NOT guard-enforced. Keeping it
@@ -74,12 +78,9 @@ REQUIRED_DIRS = [   # only what a guard genuinely refuses on
 DOC_DIR_NAMES = {"docs", "doc", "documentation", "specs", "spec"}
 DOC_TEXT_EXT = {".md", ".mdx", ".txt", ".rst", ".adoc"}
 DOC_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".drawio"}
-# Never walked: build output and dependencies hold thousands of files and no target documentation.
-# `00-triage` is excluded because it holds OUR extracts -- counting them as target docs would let
-# the check satisfy itself.
-DEPENDENCY_DIRS = {"node_modules", "lib", "libs", "foundry-lib", "out", "output", "cache",
-                   "artifacts", "target", "build", "dist", "coverage", "venv", "__pycache__",
-                   "broadcast", "typechain", "typechain-types"}
+# Never walked: build output and dependencies (DEPENDENCY_DIRS, from poc_mentions) hold thousands
+# of files and no target documentation. `00-triage` is excluded because it holds OUR extracts --
+# counting them as target docs would let the check satisfy itself.
 # OUR working directories, not the target's. Pruning them is what stops the check reading our own
 # notes as the target's documentation -- engagement 1's PoC attachment bundles each carry a manifest
 # and were being counted as separate checkouts.
@@ -615,6 +616,44 @@ def check_generated_rows_unimported(eng: Path) -> list[tuple[str, str, str]]:
              f"emits an importable table (see fix-adjacency.py --emit-ledger).")]
 
 
+# ------------------------------------------------- warnings a generator left in its rows file
+#
+# fix-adjacency warns when a report layout may have credited a neighbouring finding's functions
+# to a fix, or when findings marked fixed gave no claim at all (one firm's report gave 0 rows that
+# way before REF-34). Printed to stderr, those warnings are read only if someone is watching the run. Written
+# into the rows file, this check sees them on every doctor run.
+GENERATOR_WARNING_RE = re.compile(r"^<!--\s*([\w-]+) warning:\s*(.*?)\s*-->\s*$")
+
+
+def _rows_file_warnings(path: Path) -> list[str]:
+    text = path.read_text(errors="ignore")
+    if path.suffix == ".md":
+        return [m.group(2) for line in text.splitlines() if (m := GENERATOR_WARNING_RE.match(line))]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []                        # unreadable JSON is check_generated_rows_unimported's line
+    warnings = data.get("warnings") if isinstance(data, dict) else None
+    return [str(w) for w in warnings] if isinstance(warnings, list) else []
+
+
+def check_generator_warnings(eng: Path) -> list[tuple[str, str, str]]:
+    """GAP when a generator's rows file carries warnings about the rows in it. One bundled row."""
+    hunt = eng / "01-hunt"
+    if not hunt.is_dir():
+        return []
+    found = [(f.name, w) for f in sorted({f for g in GEN_ROWS_GLOBS for f in hunt.glob(g)})
+             for w in _rows_file_warnings(f)]
+    if not found:
+        return []
+    files = sorted({name for name, _ in found})
+    first_file, first = found[0]
+    return [(GAP, f"{len(found)} generator warning(s) in {', '.join(files)}",
+             f"[B2/B3] Read them before trusting those rows: a warning means some rows may name a "
+             f"neighbouring finding's functions, or some fixes gave no row. First, from {first_file}: "
+             f"{first[:240]}")]
+
+
 # ----------------------------------------------------------- poc/ empty with rows on the board
 #
 # REF-22's first, simple form (bench/improvement-backlog.md, decided 2026-09-24): `UNTESTED`
@@ -657,8 +696,9 @@ def check_poc_empty(eng: Path) -> list[tuple[str, str, str]]:
 # engagement cut from this release, REF-22) were both rows argued away in prose and left UNTESTED; Rich
 # caught the second by hand and all three were refuted by real tests in about twenty minutes.
 #
-# The boundary is fixed by Rich, not inferred: an engagement has reached close-out once it
-# has a submissions/ directory OR any CONFIRMED row. Before that, UNTESTED is the design --
+# The boundary is declared, not inferred (Rich, 2026-10-21): an engagement has reached
+# close-out once its PHASES.md records Phase 5, done or skipped. The earlier stand-in, a
+# submissions/ directory or any CONFIRMED row, fired on live hunts. Before that, UNTESTED is the design --
 # Phases 1-2 generate wide and suppress nothing (CLAUDE.md, "never gate row CREATION") -- so
 # this must stay silent, or it would throttle the sweep it must not gate.
 def check_untested_at_closeout(eng: Path) -> list[tuple[str, str, str]]:
@@ -680,8 +720,9 @@ def check_untested_at_closeout(eng: Path) -> list[tuple[str, str, str]]:
             statuses[f"{led.name}:{rid}"] = row_status(line)
     if not statuses:
         return []
-    past_closeout = (eng / "submissions").is_dir() or "CONFIRMED" in statuses.values()
-    if not past_closeout:
+    phases_file = eng / PHASES_FILE
+    declared = parse_phases(phases_file.read_text(errors="ignore")) if phases_file.is_file() else {}
+    if "5" not in declared:
         return []
     untested = sorted(key for key, st in statuses.items() if st == "UNTESTED")
     if not untested:
@@ -691,6 +732,132 @@ def check_untested_at_closeout(eng: Path) -> list[tuple[str, str, str]]:
              "--reason), SCOPE-HELD (with --human) and BELOW-BAR (with a --reason). UNTESTED "
              "is the one that needs none, so a hypothesis argued away in prose and never "
              "tested can sit here and nothing notices.")]
+
+
+def check_known_unreviewed(eng: Path) -> list[tuple[str, str, str]]:
+    """GAP once close-out is declared (PHASES.md records Phase 5, done or skipped) and a row the
+    matcher called KNOWN (its dedup sidecar says `result: MATCH`) has no answer from the human in
+    KNOWN_REVIEW_FILE. Silent before then, like check_untested_at_closeout.
+
+    Richard, 2026-10-26: every KNOWN row goes in front of him before Phase 5 (`cli.py
+    known-review`), because a KNOWN row is ranked last and in practice never tested, and a wrong
+    KNOWN is a real finding never filed (REF-2).
+    GAP, not BAD: no guard refuses on this.
+    """
+    phases_file = eng / PHASES_FILE
+    declared = parse_phases(phases_file.read_text(errors="ignore")) if phases_file.is_file() else {}
+    if "5" not in declared:
+        return []
+    reviewed = known_reviews(eng)
+    missing = sorted({rid for rid, *_ in known_rows(eng)} - set(reviewed))
+    if not missing:
+        return []
+    return [(GAP, f"{len(missing)} KNOWN row(s) not reviewed by the human past close-out: "
+                  f"{', '.join(missing)}",
+             f"[known-review] `cli.py known-review` prints each with its claim, the entry's quote and "
+             f"its claims list; give the page to the human and record each answer with `cli.py "
+             f"known-review --record <id> --answer \"...\"` ({KNOWN_REVIEW_FILE}). A KNOWN row is "
+             f"never tested, so this is the last look it gets.")]
+
+
+def check_scope_exclusions_file(eng: Path) -> list[tuple[str, str, str]]:
+    """GAP when PHASES.md records Phase 0 (done or skipped) and 00-triage/scope-exclusions.md is
+    missing. Exclusion quoting (G20) reads that file and is silent without it, so a missing file means
+    a hold on an exclusion goes unchecked. Silent for engagements that record no Phase 0, which covers
+    those from before phases were recorded (Richard, 2026-10-26)."""
+    phases_file = eng / PHASES_FILE
+    declared = parse_phases(phases_file.read_text(errors="ignore")) if phases_file.is_file() else {}
+    if "0" not in declared or (eng / "00-triage" / "scope-exclusions.md").is_file():
+        return []
+    return [(GAP, "Phase 0 is recorded but 00-triage/scope-exclusions.md is missing",
+             "[G20] exclusion quoting reads the programme's exclusions from this file, word for word, and "
+             "checks nothing without it. Copy the literal scope-exclusion list from Phase 0 into it.")]
+
+
+# ------------------------------------------- UNTESTED rows a test file already names
+#
+# What counts as a test file naming a row lives in tooling/poc_mentions.py, the one copy
+# privileged-screen.py also reads, so the two tools cannot disagree about the same row.
+
+
+def untested_row_ids(eng: Path) -> set[str]:
+    """Bare ids of every ledger row whose status cell reads UNTESTED, across all ledgers."""
+    return {rid for led in engagement_ledgers(eng)
+            for rid, line in parse_rows(led.read_text(errors="ignore")).items()
+            if row_status(line) == "UNTESTED"}
+
+
+def check_untested_rows_with_tests(eng: Path) -> list[tuple[str, str, str]]:
+    """WARN when an UNTESTED row is already named by a PoC test file. Advisory, never fails.
+
+    Precondition: none -- silent with no ledger, no UNTESTED rows, or no PoC test files.
+    Postcondition: at most one WARN row, listing each flagged id once with the first file
+    (sorted path order) that names it. A row is named only by (a) its id as a whole token of
+    the file name, (b) a line saying "ledger row(s)" followed by a list holding the id, or
+    (c) a line saying "Representative for" followed by such a list.
+    """
+    untested = untested_row_ids(eng)
+    if not untested:
+        return []
+    first_file = {rid: files[0] for rid, files in files_naming_rows(eng, untested).items()}
+    if not first_file:
+        return []
+    listed = ", ".join(f"{rid} ({first_file[rid].name})" for rid in sorted(first_file))
+    return [(WARN, f"{len(first_file)} UNTESTED row(s) already named by a test file: {listed}",
+             "[engagement 22, 2026-10-20] two priority-1 rows there had been tested a day earlier "
+             "but still read UNTESTED, so a later screen re-queued them. Promote each row with "
+             "the test as its evidence, or record why the test does not settle it.")]
+
+
+# ------------------------------------------- every UNTESTED row is in exactly one queue
+#
+# Engagement 22: row RQ-14 fell through every work queue -- each screen assumed another
+# one had it. An optional required artifact closes that: 03-evidence/queues.md lists each
+# UNTESTED row once with the queue that will move it, and a missing or doubled entry is visible
+# here. Optional because older engagements have no such file and nagging them would get the
+# doctor muted. It lives outside ledger/ so the ledger guards never read it as a ledger.
+# "Queue" is the work list a row waits in; a match verdict (KNOWN, PARTIAL, ...) is not one.
+QUEUES_FILE = "03-evidence/queues.md"
+_QUEUE_ROW_RE = re.compile(rf"^\s*\|\s*`?\*{{0,2}}({ROW_ID})\*{{0,2}}`?\s*\|")
+
+
+def queue_entries(text: str) -> list[str]:
+    """Row ids in a queues table's first column, in order, duplicates kept."""
+    return [m.group(1) for line in text.splitlines() if (m := _QUEUE_ROW_RE.match(line))]
+
+
+def check_queues_complete(eng: Path) -> list[tuple[str, str, str]]:
+    """GAP when an UNTESTED row is missing from 03-evidence/queues.md or listed twice; WARN when
+    a listed row is no longer UNTESTED. Silent when the file does not exist.
+
+    Postcondition: at most one GAP row and one WARN row.
+    """
+    queues = eng / QUEUES_FILE
+    if not queues.is_file():
+        return []
+    entries = queue_entries(queues.read_text(errors="ignore"))
+    untested = untested_row_ids(eng)
+    listed = set(entries)
+    missing = sorted(untested - listed)
+    doubled = sorted({rid for rid in entries if entries.count(rid) > 1})
+    stale = sorted(listed - untested)
+    out = []
+    if missing or doubled:
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)} UNTESTED row(s) missing: {', '.join(missing)}")
+        if doubled:
+            parts.append(f"{len(doubled)} row(s) listed more than once: {', '.join(doubled)}")
+        out.append((GAP, f"{QUEUES_FILE} is incomplete — {'; '.join(parts)}",
+                    "[every UNTESTED row is queued] each row appears exactly once, naming the "
+                    "queue that will move it. On engagement 22 a row fell through every queue "
+                    "because each screen assumed another had it."))
+    if stale:
+        out.append((WARN, f"{QUEUES_FILE} lists {len(stale)} row(s) no longer UNTESTED: "
+                          f"{', '.join(stale)}",
+                    "[every UNTESTED row is queued] the row has moved on (or is not in the ledger "
+                    "at all); drop it from the queues table so it stays a list of open work."))
+    return out
 
 
 # --------------------------------------------------------------------- which phases ran
@@ -755,6 +922,28 @@ def check_phases_recorded(eng: Path) -> list[tuple[str, str, str]]:
 
 
 # -------------------------------------------------------------- REF-23: the ledger header
+def check_prior_corpus(eng: Path) -> list[tuple[str, str, str]]:
+    """BAD when a prior-audit report has not been read into an extract and a key (REF-31).
+
+    The predicate is `prior_corpus.uncovered`, shared with `cli.py`'s promote-to-TIER-1
+    precondition, so a promotion IS refused while this fires: BAD, not GAP. Silent where the
+    engagement keeps no 00-triage/prior-audit-index.md (engagements created before 2026-10-19),
+    because, measured on 2026-10-19, 18 of the 20 engagements on disk with report files would fire.
+    Engagement 22: a second internal-audit round in the same folder was never extracted, and a
+    finding in it duplicated one we filed.
+    """
+    from prior_corpus import INDEX, summary, uncovered
+    missing = uncovered(eng)
+    if not missing:
+        return []
+    listed = "; ".join(f"{r} ({why})" for r, why in missing[:5]) + (
+        f"; +{len(missing) - 5} more" if len(missing) > 5 else "")
+    return [(BAD, f"{len(missing)} prior-audit report file(s) not read into an extract and a key: "
+                  f"{summary(missing)}",
+             f"[REF-31] blocks every TIER-1 promotion (cli.py). {listed}. Extract and key each "
+             f"(phase-1-hunt.md step 3), or record the pairing in 00-triage/{INDEX}.")]
+
+
 def check_ledger_header(eng: Path) -> list[tuple[str, str, str]]:
     """BAD once the ledger holds a row unless ledger/HEADER.md exists and carries all four
     required fields. Sixteen rows went into engagement 18's ledger with no header at all.
@@ -786,6 +975,39 @@ def check_ledger_header(eng: Path) -> list[tuple[str, str, str]]:
              "is not.")]
 
 
+# ------------------------------------------- Phase -1: the shadow-audit candidate check
+TRIAGE_FILE = "00-triage/target-triage.md"
+SHADOW_CHECK_HEADING_RE = re.compile(r"(?mi)^#+[ \t]*Shadow-audit candidate check\b")
+
+
+def check_shadow_candidate_recorded(eng: Path) -> list[tuple[str, str, str]]:
+    """GAP when Phase -1 is recorded done, a prior-audit report is on disk, and the triage file
+    has no "Shadow-audit candidate check" section (skill/phases/phase-m1-triage.md).
+
+    Silent when Phase -1 was skipped or not yet recorded (a shadow audit skips it), and when
+    there is no report to check. Engagement 26 (2026-10-22): a prior-audit report dated after the
+    model's training cutoff was a ready answer key, and the question of whether
+    its audited commits were reachable was only asked because someone thought of it.
+    """
+    status = parse_phases((eng / PHASES_FILE).read_text(errors="ignore")).get("-1") \
+        if (eng / PHASES_FILE).is_file() else None
+    if not status or status[0] != "done":
+        return []
+    reports = eng / "00-triage/prior-audits"
+    if not reports.is_dir() or not any(p for p in reports.rglob("*")
+                                       if p.is_file() and not p.name.startswith(".")):
+        return []
+    triage = eng / TRIAGE_FILE
+    if triage.is_file() and SHADOW_CHECK_HEADING_RE.search(triage.read_text(errors="ignore")):
+        return []
+    return [(GAP, f"Phase -1 done with a prior-audit report, but {TRIAGE_FILE} records no "
+                  f"shadow-audit candidate check",
+             "[phase-m1-triage.md] add a \"## Shadow-audit candidate check\" section: which of the "
+             "report's audited commits are publicly reachable, which rounds each could score, "
+             "whether the report post-dates the model's training cutoff, and the user's answer "
+             "on running a shadow audit (or one line saying nothing is reachable).")]
+
+
 def check(eng: Path, docs: bool = True) -> list[tuple[str, str, str]]:
     """Returns [(level, headline, detail)]. `docs=False` skips the REF-20 check."""
     out = []
@@ -800,6 +1022,7 @@ def check(eng: Path, docs: bool = True) -> list[tuple[str, str, str]]:
     out += check_statusless_rows(eng)
     out += check_bundled_rows(eng)
     out += check_finding_bodies(eng)
+    out += check_prior_corpus(eng)
 
     pa, pr = eng / "00-triage/prior-audits", eng / "00-triage/potential-risks"
     marker = (eng / "00-triage/NO-PRIOR-ART.md").exists()
@@ -854,14 +1077,20 @@ def check(eng: Path, docs: bool = True) -> list[tuple[str, str, str]]:
     # recently active one, and this must still fire on it in --all mode, which is the
     # whole point of the census (bench/improvement-backlog.md REF-22).
     out += check_untested_at_closeout(eng)
+    out += check_known_unreviewed(eng)
 
     if docs:
         out += check_protocol_docs(eng)
+        out += check_scope_exclusions_file(eng)
         out += check_ledger_is_cli_managed(eng)
         out += check_generators_unrun(eng)
         out += check_generated_rows_unimported(eng)
+        out += check_generator_warnings(eng)
         out += check_poc_empty(eng)
+        out += check_untested_rows_with_tests(eng)
+        out += check_queues_complete(eng)
         out += check_phases_recorded(eng)
+        out += check_shadow_candidate_recorded(eng)
         out += check_ledger_header(eng)
     return out
 
