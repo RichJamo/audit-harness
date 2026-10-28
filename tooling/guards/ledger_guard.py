@@ -18,6 +18,9 @@ from __future__ import annotations
 import json, os, re, sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from table_cell import unescape_cell  # noqa: E402  REF-30: the read half of the escape.
+
 # A ledger row is a markdown table line whose FIRST cell is a hypothesis id.
 #
 # The hyphen used to be mandatory (`[A-Z][A-Z0-9]{0,9}-[0-9]{1,3}`), which silently
@@ -259,10 +262,21 @@ SEP_CHARS = " \t\u00b7"
 
 
 def field(line: str, key: str) -> str | None:
+    """The value of one inline field, as the person who wrote it wrote it.
+
+    REF-30: the pattern ends a value at `|`, because that is a cell boundary. So a `|`
+    INSIDE a value -- `|U| <= 1`, or a prose --reason with a pipe in it -- used to cut
+    the value off mid-sentence. `cli.py render` now writes `&#124;` instead; this is the
+    half that reads it back. This is the reader the Stop-hook state guard funnels every
+    G1/G2/G12/G14 input through, so it is the one place the decode has to happen.
+
+    unescape_cell touches nothing else, so a value that never went through the escape
+    returns unchanged, and a row written before the escape reads exactly as it did.
+    """
     others = "|".join(re.escape(k) for k in FIELD_KEYS if k.lower() != key.lower())
     m = re.search(rf"\b{re.escape(key)}\s*:\s*(.*?)(?=[\s\u00b7]*\b(?:{others})\s*:|\||$)",
                   line, re.IGNORECASE | re.DOTALL)
-    return m.group(1).strip(SEP_CHARS) if m else None
+    return unescape_cell(m.group(1).strip(SEP_CHARS)) if m else None
 
 
 def load_sidecar(rel: str, eng: Path) -> tuple[dict | None, str | None]:

@@ -26,6 +26,8 @@ import json, subprocess, os, re, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "guards"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from table_cell import unescape_cell  # noqa: E402
 from ledger_guard import (  # noqa: E402
     FORMAT_MARKER, engagement_ledgers, parse_rows, parse_row_lines, finding_body_files,
     load_sidecar, as_list, header_missing_fields, row_status,
@@ -334,7 +336,12 @@ def check_bundled_rows(eng: Path) -> list[tuple[str, str, str]]:
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if len(cells) < 2:
                 continue
-            hyp = cells[1]
+            # unescape_cell FIRST (REF-30): a rendered `|` is the entity `&#124;`, which
+            # carries a semicolon of its own, so two pipes in a hypothesis inject two
+            # semicolons and flip this predicate from silent to firing -- on exactly the
+            # rows REF-30 was filed for (absolute-value bars such as `|U|` and `|q - p|`).
+            # A character count has to be taken on the text, not on the transport encoding.
+            hyp = unescape_cell(cells[1])
             if len(hyp) >= 25 and hyp.count(";") >= 2:
                 hits.append(f"{led.name}:{rid}")
     if not hits:
