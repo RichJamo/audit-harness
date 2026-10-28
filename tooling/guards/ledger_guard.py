@@ -10,6 +10,9 @@ Guards (criteria: docs/guard-register.md):
   G2  disposition cites evidence that exists (REFUTED) or a human (SCOPE-HELD)
   G3  a row may never go from UNTESTED to gone
   G14 a NO-MATCH dedup is cleared against finding BODIES, not section extracts alone
+  G17 every function the row's entry names is a dedup term on its own (new promotions)
+  G19 a MATCH sidecar, when written, quotes the entry for every caller and impact it claims
+  G20 a SCOPE-HELD declared to rest on a scope exclusion quotes it (REF-32; cli.py only)
 
 NEVER gates row creation. Phases 1-2 generate wide and suppress nothing; throttling
 that would trade a rare priced failure for a constant invisible one.
@@ -20,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from table_cell import unescape_cell  # noqa: E402  REF-30: the read half of the escape.
+from match_rule import ATTACK_CLAUSES, CLAUSES  # noqa: E402  REF-31: G16 reads the one match rule.
 
 # A ledger row is a markdown table line whose FIRST cell is a hypothesis id.
 #
@@ -35,7 +39,9 @@ from table_cell import unescape_cell  # noqa: E402  REF-30: the read half of the
 # Anchored to the first cell: unanchored .search() matched ids buried mid-row (it found
 # a spurious `H8-04` on engagement 8). Requiring >=1 digit is what keeps header cells
 # (`id`, `ID`, `File`, `status`, `contract`, `subsystem`) from parsing as rows.
-ROW_RE = re.compile(r"^\s*\|\s*\*{0,2}([A-Z][A-Z0-9]{0,5}-?[0-9]{1,3}[a-z]?)\*{0,2}\s*\|")
+# One row id, unanchored, for readers that find ids inside prose (tooling/poc_mentions.py).
+ROW_ID = r"[A-Z][A-Z0-9]{0,5}-?[0-9]{1,3}[a-z]?"
+ROW_RE = re.compile(rf"^\s*\|\s*\*{{0,2}}({ROW_ID})\*{{0,2}}\s*\|")
 # The toolkit repo itself is never an engagement: its docs/, templates/ and examples/
 # hold ledger-shaped files that must not be gated. .parents[2] == audit-toolkit root.
 TOOLKIT_ROOT = Path(__file__).resolve().parents[2]
@@ -58,12 +64,18 @@ EVIDENCE_TOKEN_RE = re.compile(r"[\w./\-]+(?:::[A-Za-z_]\w*)?")
 # Identifiers as our ledger actually writes them: `backticked` or as a call foo(.
 IDENT_CALL = re.compile(r"\b([a-z][A-Za-z0-9_]{5,})\s*\(")
 IDENT_TICK = re.compile(r"`([A-Za-z_][A-Za-z0-9_.]{5,})`")
+# A search term that is itself one function or variable name: lower case or underscore first, so
+# a phrase, a contract name (`VaultRouter`) or an auditor (`ChainSecurity`) is not one.
+# Those co-occur with everything in a report about that contract (measured on engagement 23).
+IDENT_TERM = re.compile(r"[a-z_][A-Za-z0-9_.]{5,}")
 # A real identifier is camelCase, snake_case or dotted. Plain English words in backticks
 # (`control`, `policy`) are not identifiers and matching them points at the wrong report.
 CODEY = re.compile(r"(?:[a-z][A-Za-z0-9]*[A-Z])|_|\.")
 # Identifiers so central they appear in every report; matching them is noise, not signal.
 IDENT_STOPWORDS = {"require", "function", "returns", "address", "msg.sender", "revert"}
 MIN_COOCCURRING_IDENTS = 2
+# The placeholder `tooling/ledger/sidecar.py` writes into an unfilled skeleton.
+SKELETON_TODO = "<FILL IN>"
 # --------------------------------------------------------------- G14 (REF-3) constants
 # Finding-ID shapes, one per auditor house, as they appear in the extracted text on disk:
 # Hacken `F-2026-1000`, Macro/CodeHawks `[H-01]`, WatchPug `[WP-M3]` (with a UNICODE
@@ -320,7 +332,7 @@ def check_g3(old: dict[str, str], new: dict[str, str], content: str) -> list[str
         return []
     surviving = []
     for r in vanished:
-        m = re.search(rf"{re.escape(r)}\b.{{0,120}}?MERGED-INTO:\s*([A-Z][A-Z0-9]*-[0-9]+)", content)
+        m = re.search(rf"{re.escape(r)}\b.{{0,120}}?MERGED-INTO:\s*({ROW_ID})", content)
         if not (m and m.group(1) in new):
             surviving.append(r)
     if not surviving:
@@ -333,7 +345,19 @@ def check_g3(old: dict[str, str], new: dict[str, str], content: str) -> list[str
 
 
 # ---------------------------------------------------------------- G1
-def check_g1(row_id: str, dedup_rel: str | None, row_text: str, eng: Path) -> list[str]:
+def _holds(value, needle: str) -> bool:
+    """Does a parsed YAML value (a string, or lists and dicts of them) contain `needle`?"""
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, dict):
+        return any(_holds(v, needle) for v in value.values())
+    if isinstance(value, list):
+        return any(_holds(v, needle) for v in value)
+    return False
+
+
+def check_g1(row_id: str, dedup_rel: str | None, row_text: str, eng: Path,
+             with_terms: bool = False) -> list[str]:
     """G1, decoupled from the markdown row.
 
     Takes the DEDUP pointer and the row's descriptive text as separate arguments rather
@@ -375,6 +399,14 @@ def check_g1(row_id: str, dedup_rel: str | None, row_text: str, eng: Path) -> li
                        f"Refusing to pass a promotion unchecked."]
     if err:
         return errs + [f"G1 [{row_id}] {err}"]
+    # An unfinished `cli.py dedup-skeleton`: its placeholders are long enough to pass the length
+    # checks below, so they are refused by name. Read from the PARSED values, never the raw text:
+    # a comment holding the word must neither trigger this nor be what triggers it (review of the
+    # skeleton: its own header comment once satisfied the check while every field was pre-filled).
+    unfilled = sorted({k for k, v in data.items() if _holds(v, SKELETON_TODO)})
+    if unfilled:
+        return errs + [f"G1 [{row_id}] {rel} still holds {SKELETON_TODO} in {', '.join(unfilled)} "
+                       f"(from `cli.py dedup-skeleton`). Fill every one before promoting."]
 
     searched, resolved = as_list(data.get("searched")), []
     for sp in searched:
@@ -439,9 +471,20 @@ def check_g1(row_id: str, dedup_rel: str | None, row_text: str, eng: Path) -> li
     # NO-MATCH only, deliberately. On a PARTIAL the identifiers co-occur BY DEFINITION -- the
     # root cause matched, that is what PARTIAL asserts -- so this check would fire on every one
     # and be disabled within a day, which is constraint 3 in CLAUDE.md.
+    #
+    # WITH TERMS, FOR NEW PROMOTIONS (`with_terms=True`, the ledger CLI only). On engagement 23 a
+    # row named one identifier, so nothing could co-occur and its NO-MATCH passed, while a sibling
+    # row naming three was caught against a prior-audit note describing the same overflow. The
+    # sidecar's own `terms:` (at least 3, by rule) widen the set: each term that is itself a code
+    # identifier joins the row's. The hooks keep the row-only set, so sidecars written before this
+    # keep passing (it fired on about 1.4% of NO-MATCH sidecars on disk when measured).
     if result == "NO-MATCH":
         idents = {i for i in (IDENT_CALL.findall(row_text) + IDENT_TICK.findall(row_text))
                   if i.lower() not in IDENT_STOPWORDS and CODEY.search(i)}
+        if with_terms:
+            idents |= {t for t in as_list(data.get("terms"))
+                       if IDENT_TERM.fullmatch(t) and t.lower() not in IDENT_STOPWORDS
+                       and CODEY.search(t)}
         best, best_hits = None, []
         for section in sorted(pr.glob("*.txt")):
             hit = sorted(i for i in idents if i in section.read_text(errors="ignore"))
@@ -499,6 +542,174 @@ def check_cross_check_answered(row_id: str, section: Path, hits: list[str],
         return [f"G1 [{row_id}] cross_check_answered: names a section that does not resolve to a "
                 f"file under potential-risks/. Use `<filename>:<line>`. Offending: {'; '.join(bad)}."]
     return []
+
+
+# ---------------------------------------------------------------- G19
+CLAIM_KINDS = ("caller", "impact")
+MIN_CLAIM_QUOTE_CHARS = 20
+NOT_STATED = "not stated"
+
+
+def check_g19(row_id: str, data: dict, eng: Path) -> list[str]:
+    """G19 (Richard, 2026-10-26): a `result: MATCH` quotes the entry for every caller and every
+    impact the row claims, or the row is PARTIAL.
+
+    Pre: `data` is a parsed dedup sidecar. Post: [] unless `result:` is MATCH and the `claims:` list
+    is absent, empty, or holds a claim that is not exactly one of `caller:` / `impact:` with a
+    `quote:` of at least MIN_CLAIM_QUOTE_CHARS that is a whitespace-normalised exact substring of a
+    file in `searched:` under 00-triage/. A quote of `not stated` is the matcher saying the entry does not state the
+    claim, and that is what PARTIAL means (`tooling/match_rule.py`).
+
+    Why in code: one arm of a pre-registered grader experiment (`bench/PREREG-full-text-grader.md`)
+    gave a model the prose rule "a row claiming a caller or impact the entry does not state is
+    partial"; it found the extra claim, quoted it, and still answered "same". A wrong KNOWN is a
+    finding never tested (REF-2), so the decision is taken out of the model's hands.
+
+    It cannot check that the list holds EVERY claim the row makes; the human sees each list at
+    close-out (`cli.py known-review`).
+    """
+    if str(data.get("result", "")).strip().upper() != "MATCH":
+        return []
+    claims = data.get("claims")
+    how = (f"      Write `claims:` with one item per caller and per impact the row claims:\n"
+           f"        - caller: <what the row claims>     (or impact:)\n"
+           f"          quote: <the entry's words that state it, copied exactly, >= "
+           f"{MIN_CLAIM_QUOTE_CHARS} chars> | {NOT_STATED}\n"
+           f"      A claim the entry does not state makes the row PARTIAL: write `result: PARTIAL` "
+           f"with `unmatched:` naming it.\n"
+           f"      Why: a wrong KNOWN is a real finding never tested (G19, Richard 2026-10-26).")
+    if not isinstance(claims, list) or not claims:
+        return [f"G19 [{row_id}] result: MATCH with no `claims:` list.\n{how}"]
+    # Only entries copied verbatim count (G19_VERBATIM_SOURCE): a quote from our own ledger, triage
+    # notes or agent-written keys would let the row's words stand in for the entry's (found in review).
+    texts = []
+    for sp in as_list(data.get("searched")):
+        cand = (Path(sp) if Path(sp).is_absolute() else (eng / sp)).resolve()
+        try:
+            rel = cand.relative_to(eng.resolve()).as_posix()
+        except ValueError:
+            continue
+        if cand.is_file() and G19_VERBATIM_SOURCE.match(rel) and not G19_NOT_VERBATIM_NAME.search(cand.name):
+            texts.append(" ".join(cand.read_text(errors="ignore").split()))
+    problems = []
+    for n, claim in enumerate(claims, 1):
+        kinds = [k for k in CLAIM_KINDS if isinstance(claim, dict) and str(claim.get(k) or "").strip()]
+        if len(kinds) != 1:
+            problems.append(f"claim {n} must name exactly one of caller: or impact:")
+            continue
+        label = f"{kinds[0]} {' '.join(str(claim[kinds[0]]).split())!r}"
+        quote = " ".join(str(claim.get("quote") or "").split())
+        if quote.lower() == NOT_STATED:
+            problems.append(f"{label} is not stated by the entry")
+        elif len(quote) < MIN_CLAIM_QUOTE_CHARS:
+            problems.append(f"{label} has a quote under {MIN_CLAIM_QUOTE_CHARS} characters")
+        elif not any(quote in t for t in texts):
+            problems.append(f"{label} has a quote that is not an exact substring of any file in "
+                            f"searched: under 00-triage/")
+    if not problems:
+        return []
+    return [f"G19 [{row_id}] result: MATCH, but the entry does not state every claim:\n"
+            + "".join(f"        - {p}\n" for p in problems) + how]
+
+
+# Where a KNOWN claim's quote may come from: text copied verbatim from the programme, prior audits
+# or other researchers, never our own files. Measured 2026-10-26 over the 408 MATCH sidecars on disk:
+# 403 quote one of these, 276 potential-risks/,
+# 109 prior-audits-text/, 12 fellow-issues/, 6 known-issues-verbatim.md, and filed-issues.md is a
+# synced snapshot of researchers' issues. Excluded: target-triage.md and other triage notes,
+# prior-audit-keys/ (agent-written), scope-exclusions.md, README.md.
+G19_VERBATIM_SOURCE = re.compile(
+    r"00-triage/(?:(?:prior-audits-text|potential-risks|fellow-issues|protocol-docs|program"
+    r"|[\w-]+-rules)/|(?:known-issues-verbatim|filed-issues|brief)\.md$)")
+# Notes we write inside those folders, by file name (found in review: a README in potential-risks/,
+# CORPUS.md and FETCH-* lists in prior-audits/, generated FINDINGS-INDEX files). prior-audits/ itself is
+# not admitted: it holds the source documents and our fetch notes, and no MATCH quote on disk came from it.
+G19_NOT_VERBATIM_NAME = re.compile(r"(?i)^(?:readme|corpus|fetch-|index|findings-index)|not-retained|superseded")
+
+# A sidecar's raw text declaring MATCH, read where its YAML cannot be.
+SAYS_MATCH = re.compile(r"(?m)^result:\s*['\"]?MATCH\b")
+
+
+def is_dedup_sidecar(p: Path) -> bool:
+    return p.suffix == ".md" and p.parent.name == "dedup" and p.parent.parent.name == "ledger"
+
+
+def check_sidecar_write(path: Path, content: str) -> list[str]:
+    """The hook's half of G19: judge a dedup sidecar as the Write or Edit would leave it.
+
+    Only sidecars written or changed from now on meet this; an edit to an old MATCH sidecar is judged
+    on the whole file it leaves, so it must gain `claims:`. Silent outside an engagement, and while
+    `result:` still holds a `cli.py dedup-skeleton` placeholder, which the skeleton leaves there for
+    KNOWN: writing MATCH is the last edit and is judged in full. A placeholder anywhere else, claims:
+    included, silences nothing (found in review). YAML that does not parse is refused when the
+    text says MATCH: a KNOWN row is normally never promoted, so no later check would read it.
+    """
+    eng = engagement_root(path)
+    if eng is None or _in_toolkit(path):
+        return []
+    try:
+        import yaml
+    except ImportError:
+        if SAYS_MATCH.search(content):
+            return [f"G19 [{path.stem}] cannot run: pyyaml is not installed. `pip3 install pyyaml` "
+                    f"(or run tooling/bootstrap.sh). Refusing a MATCH sidecar unchecked."]
+        return []
+    try:
+        data = yaml.safe_load(content)
+    except Exception as e:
+        if SAYS_MATCH.search(content):
+            return [f"G19 [{path.stem}] a MATCH sidecar that is not valid YAML: {str(e).splitlines()[0]}. "
+                    f"Nothing later reads a KNOWN row's sidecar, so it must parse when written."]
+        return []
+    if not isinstance(data, dict) or _holds(data.get("result"), SKELETON_TODO):
+        return []
+    return check_g19(path.stem, data, eng)
+
+
+# The human's answer on each KNOWN row, one `<id>: <answer>` line per row, the last line for an id
+# winning. Written by `cli.py known-review --record`, read by `engagement-doctor.py` at close-out.
+# Under 03-evidence/, not ledger/, so is_ledger() never takes it for a ledger.
+KNOWN_REVIEW_FILE = "03-evidence/known-review.md"
+_KNOWN_REVIEW_LINE_RE = re.compile(rf"(?m)^[ \t]*[-*]?[ \t]*`?({ROW_ID})`?[ \t]*:[ \t]*(\S.*?)[ \t]*$")
+
+
+def known_rows(eng: Path) -> list[tuple[str, str, str, dict]]:
+    """Every ledger row whose dedup sidecar says `result: MATCH`: (id, row line, sidecar, data).
+
+    The sidecar is the row's DEDUP pointer, or `ledger/dedup/<id>.md` when the row has none: a row
+    the matcher called KNOWN usually stays UNTESTED, and nothing records a pointer until a promotion.
+    A row held in two ledger files with the same sidecar is listed once. A sidecar that cannot be
+    loaded but whose text says MATCH is listed with `__unreadable__` set to why, never dropped:
+    a load failure must not read as "not KNOWN".
+    """
+    out, seen = [], set()
+    for led in engagement_ledgers(eng):
+        for rid, line in parse_rows(led.read_text(errors="ignore")).items():
+            rel = field(line, "DEDUP")
+            if not rel and (eng / "ledger" / "dedup" / f"{rid}.md").is_file():
+                rel = f"ledger/dedup/{rid}.md"
+            if not rel or (rid, rel) in seen:
+                continue
+            data, err = load_sidecar(rel, eng)
+            if err:
+                cand = Path(rel) if Path(rel).is_absolute() else eng / rel
+                raw = cand.read_text(errors="ignore") if cand.is_file() else ""
+                if not SAYS_MATCH.search(raw):
+                    continue
+                why = "pyyaml is not installed" if err == "__NOYAML__" else err
+                data = {"result": "MATCH", "__unreadable__": why}
+            if not data or str(data.get("result", "")).strip().upper() != "MATCH":
+                continue
+            seen.add((rid, rel))
+            out.append((rid, line, rel, data))
+    return out
+
+
+def known_reviews(eng: Path) -> dict[str, str]:
+    """id -> the human's recorded answer, from KNOWN_REVIEW_FILE (empty when it does not exist)."""
+    p = eng / KNOWN_REVIEW_FILE
+    text = p.read_text(errors="ignore") if p.is_file() else ""
+    return {m.group(1): m.group(2) for m in _KNOWN_REVIEW_LINE_RE.finditer(text)}
 
 
 # ---------------------------------------------------------------- G14
@@ -562,7 +773,7 @@ def finding_body_files(eng: Path) -> list[Path]:
     return out
 
 
-def check_g14(row_id: str, dedup_rel: str | None, eng: Path) -> list[str]:
+def check_g14(row_id: str, dedup_rel: str | None, eng: Path, every: bool = False) -> list[str]:
     """REF-3. A NO-MATCH is cleared against finding BODIES, never against section extracts alone.
 
     WHY THIS EXISTS. G1 already refuses a digest -- `searched:` must name a file under
@@ -590,13 +801,21 @@ def check_g14(row_id: str, dedup_rel: str | None, eng: Path) -> list[str]:
     three engagement 16, all three true positives on hand review. On all verdicts rather than
     NO-MATCH alone it would be 7 (4.0%); the extra four are PARTIALs whose `unmatched:` text
     proves the bodies were read and only the `searched:` list under-recorded it.
+    EVERY BODY, FOR NEW PROMOTIONS (`every=True`, the ledger CLI; REF-31). On engagement 22 a PARTIAL
+    against the known issues hid a full MATCH in a report nobody had searched: a partial match
+    against one source is exactly when a fuller one in another changes the filing. So a new
+    promotion with NO-MATCH or PARTIAL must list EVERY body file in `searched:`, not just one.
+    Measured 2026-10-19 over every sidecar on disk: "every body"
+    fires on 70 of 530 PARTIALs and 96 of 1,433 NO-MATCHes, against 3 for the old rule, so the
+    Stop-hook backstop keeps the old any-body, NO-MATCH-only check, and old rows stay silent.
     """
     if not dedup_rel:
         return []                      # G1 owns the missing-sidecar case
     data, err = load_sidecar(dedup_rel, eng)
     if err or not data:
         return []                      # G1 owns sidecar resolution; do not double-report
-    if str(data.get("result", "")).strip().upper() != "NO-MATCH":
+    result = str(data.get("result", "")).strip().upper()
+    if result != "NO-MATCH" and not (every and result == "PARTIAL"):
         return []
     bodies = finding_body_files(eng)
     if not bodies:
@@ -608,6 +827,21 @@ def check_g14(row_id: str, dedup_rel: str | None, eng: Path) -> list[str]:
             resolved.add(cand.resolve())
         except OSError:
             continue
+    if every:
+        # A folder in `searched:` counts for every body file under it ("grepped the whole folder").
+        unsearched = [str(b.relative_to(eng)) for b in bodies
+                      if not ({b.resolve(), *b.resolve().parents} & resolved)]
+        if not unsearched:
+            return []
+        return [
+            f"G14 [{row_id}] declared {result} without searching every file that holds prior-audit "
+            f"finding bodies.\n"
+            f"      A partial or no match against one source is exactly when a fuller match in an "
+            f"unsearched one\n"
+            f"      changes the decision. Search these and add them to `searched:`: "
+            f"{', '.join(unsearched)}\n"
+            f"      Why: REF-31 -- a PARTIAL against the known issues hid a full MATCH "
+            f"in an unread report."]
     if any(b.resolve() in resolved for b in bodies):
         return []
     names = [str(b.relative_to(eng)) for b in bodies]
@@ -623,6 +857,184 @@ def check_g14(row_id: str, dedup_rel: str | None, eng: Path) -> list[str]:
         f"      Search the bodies and add the file to `searched:`: {shown}\n"
         f"      Why: REF-3. A hunter's top Critical was Hacken F-2026-1000 -- title \"Bridge Deposits\", "
         f"body ours."]
+
+
+# ---------------------------------------------------------------- G17
+# What the entry field names as a function, in the three shapes our ledgers write it:
+# `backticked` (optionally `Contract.fn` or `fn(...)`), Contract.fn unbackticked, and fn( as a call.
+ENTRY_TICK_RE = re.compile(r"`([^`]+)`")
+ENTRY_TICK_IDENT_RE = re.compile(r"^\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(\([^)]*\))?\s*$")
+# The qualifier must be capitalised (a contract or interface name), which is what keeps
+# `msg.sender` and `foo.sol` out of the unbackticked shape.
+ENTRY_QUALIFIED_RE = re.compile(r"\b[A-Z]\w*\.([a-z_]\w*)\b")
+# No space before the paren, and not a plural marker: "anyone (via X)" and "function(s)" are prose.
+ENTRY_CALL_RE = re.compile(r"\b([a-z_]\w*)\((?!e?s\))")
+# A dotted token whose last part is one of these names a file or a global, never a function.
+ENTRY_NOT_FUNCTION = {"sol", "t", "json", "md", "rs", "go", "ts", "js", "py", "txt", "vy", "yaml",
+                      "sender", "value", "origin", "timestamp", "number"}
+ENTRY_GLOBAL_QUALIFIERS = {"msg", "block", "tx", "abi", "type", "this", "super"}
+# Solidity built-ins and casts, never a function of the target: an entry such as
+# "amount = type(uint256).max" or "abi.encode(x) then keccak256(y)" names none (found in review).
+SOLIDITY_BUILTINS = {"type", "keccak256", "sha256", "ripemd160", "ecrecover", "addmod", "mulmod",
+                     "gasleft", "blockhash", "selfdestruct", "assert", "payable", "encode",
+                     "encodePacked", "encodeWithSelector", "encodeWithSignature", "encodeCall",
+                     "decode"}
+SOLIDITY_CAST_RE = re.compile(r"(?:u?int|bytes)\d*")
+
+
+def entry_identifiers(entry: str) -> list[str]:
+    """The bare function names an entry field names, each once (backticked ones first).
+
+    Conservative on purpose: a missed identifier only leaves the rule silent, while a word
+    misread as an identifier refuses a promotion for nothing. So only code-shaped tokens
+    count. A backticked token counts when it is qualified, a call, or camelCase/snake_case;
+    a lone backticked lowercase word could be prose. Capitalised-only tokens (contract names
+    such as `Registry`) and ALL-CAPS role words (GOVERNOR, KEEPER) are not functions.
+    """
+    found: list[str] = []
+
+    def keep(qualified: str, is_call: bool) -> None:
+        parts = qualified.split(".")
+        bare = parts[-1]
+        if len(parts) > 1 and (parts[0] in ENTRY_GLOBAL_QUALIFIERS or bare in ENTRY_NOT_FUNCTION):
+            return
+        if not re.match(r"[a-z_]", bare) or bare.lower() in IDENT_STOPWORDS:
+            return                         # Contract names, role words, `require` and kin
+        if bare in SOLIDITY_BUILTINS or SOLIDITY_CAST_RE.fullmatch(bare):
+            return                         # `type(uint256)`, `abi.encode`, `keccak256`, casts
+        if len(parts) == 1 and not is_call and not CODEY.search(bare):
+            return                         # a lone lowercase word in backticks may be prose
+        if bare not in found:
+            found.append(bare)
+
+    for tick in ENTRY_TICK_RE.findall(entry):
+        m = ENTRY_TICK_IDENT_RE.match(tick)
+        if m:
+            keep(m.group(1), bool(m.group(2)))
+    untick = ENTRY_TICK_RE.sub(" ", entry)
+    for m in ENTRY_QUALIFIED_RE.finditer(untick):
+        keep(m.group(0), True)
+    for name in ENTRY_CALL_RE.findall(untick):
+        keep(name, True)
+    return found
+
+
+# The documents G17 searches: the known and filed issues and the target's README, where the
+# client describes its own design. Prior-audit report bodies are left to G1's cross-check and
+# G14's every-body search; including them made G17 fire on about 83% of qualifying rows on disk
+# against about 42% without (Richard's choice, 2026-10-20).
+# Our own ledger and notes are never sources.
+G17_SOURCE_GLOBS = ("00-triage/known-issues*", "00-triage/filed-issues*",
+                    "target/README*", "repo/README*")
+G17_TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".rst", ""}
+G17_LINES_SHOWN = 3
+
+
+def g17_source_files(eng: Path) -> list[Path]:
+    """The text files G17 searches, each once, in sorted order."""
+    return sorted({f for g in G17_SOURCE_GLOBS for f in eng.glob(g)
+                   if f.is_file() and f.suffix.lower() in G17_TEXT_SUFFIXES})
+
+
+def g17_hits(name: str, files: list[Path], eng: Path) -> dict[str, list[tuple[int, str]]]:
+    """Each file (relative to `eng`) whose text holds `name` as a whole identifier, with the
+    line numbers and lines. Case-sensitive, like the identifier itself."""
+    word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
+    out: dict[str, list[tuple[int, str]]] = {}
+    for f in files:
+        try:
+            lines = f.read_text(errors="ignore").splitlines()
+        except OSError:
+            continue
+        found = [(i, ln.strip()) for i, ln in enumerate(lines, 1) if word.search(ln)]
+        if found:
+            out[str(f.relative_to(eng))] = found
+    return out
+
+
+def g17_answered(data: dict) -> set[tuple[str, str]]:
+    """(name, file) pairs the sidecar's `name_hits_read:` answers, each with a non-empty note."""
+    pairs = set()
+    raw = data.get("name_hits_read")
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        name, file, note = (str(entry.get(k, "")).strip() for k in ("name", "file", "note"))
+        if name and file and note:
+            pairs.add((name, file))
+    return pairs
+
+
+def check_g17(row_id: str, dedup_rel: str | None, entry: str | None, eng: Path) -> list[str]:
+    """Search each function the row's entry names, on its own, in the client's own documents (known
+    and filed issues, the target README); refuse while a hit is unanswered.
+
+    Pre: `entry` is the row's entry field as written (None or "" is fine). Post: one error naming
+    every function with an unanswered hit and showing the lines, or [] -- silent when there is no
+    sidecar to read (G1 owns that), when the result is MATCH, when the entry names no function,
+    when the engagement has no source document, or when every hit is answered. A hit is answered
+    by a `name_hits_read:` entry {name, file, note}, the note saying why that line is not this
+    bug. The tool runs the search itself, so a term list cannot satisfy it on paper.
+
+    NO-MATCH AND PARTIAL ONLY. Those are the verdicts where a document line the search missed
+    can sink a filing (the row that motivated it was PARTIAL). A MATCH has already found its source.
+
+    WHY THIS EXISTS. Engagement 22, 2026-10-20: a filed row's sidecar had searched the client README
+    only with joined phrases, while the README described exactly that design in prose. Shown here
+    with synthetic names: the entry is "`IPool.openPosition` by the pool owner, forwarded to
+    `Registry.openPosition`"; the sidecar searched "openPosition lockPeriod" and "owner-chosen
+    lock"; the README says "calls the pool's `openPosition` ... passes the initial lock period
+    explicitly". No phrase matched, and `openPosition` alone would have hit.
+    Richard chose this form 2026-10-20 over a term-list check, which an agent can satisfy by
+    adding the word without searching.
+
+    ROWS NOT YET HOLDING G1 ONLY, like G14's every-body rule: `cli.py promote` calls this; the
+    Stop-hook backstop and the PreToolUse row driver do not, and State Locking means a row whose
+    G1 is already discharged is not re-charged. It is not dated: an old UNTESTED row, or one that
+    left by SCOPE-HELD, BELOW-BAR or BLOCKED without passing TIER-1, is charged when next promoted.
+    It would refuse 14 of the 279 qualifying rows on disk when measured.
+    """
+    if not dedup_rel or not entry:
+        return []
+    needed = entry_identifiers(entry)
+    if not needed:
+        return []
+    data, err = load_sidecar(dedup_rel, eng)
+    if err or not data:
+        return []                      # G1 owns sidecar resolution; do not double-report
+    if str(data.get("result", "")).strip().upper() not in ("NO-MATCH", "PARTIAL"):
+        return []
+    files = g17_source_files(eng)
+    if not files:
+        return []
+    answered = g17_answered(data)
+    open_hits: dict[str, dict[str, list[tuple[int, str]]]] = {}
+    for name in needed:
+        hits = {f: lines for f, lines in g17_hits(name, files, eng).items() if (name, f) not in answered}
+        if hits:
+            open_hits[name] = hits
+    if not open_hits:
+        return []
+    shown = []
+    for name, hits in open_hits.items():
+        for f, lines in hits.items():
+            for i, ln in lines[:G17_LINES_SHOWN]:
+                shown.append(f"        {name} in {f}:{i}: {ln[:160]}")
+            if len(lines) > G17_LINES_SHOWN:
+                shown.append(f"        {name} in {f}: {len(lines) - G17_LINES_SHOWN} more line(s)")
+    first_name, first_hits = next(iter(open_hits.items()))
+    first_file = next(iter(first_hits))
+    return [
+        f"G17 [{row_id}] the entry names {', '.join(open_hits)}, and searched on "
+        f"{'its' if len(open_hits) == 1 else 'their'} own "
+        f"{'it appears' if len(open_hits) == 1 else 'they appear'} in documents this sidecar has "
+        f"not answered:\n" + "\n".join(shown) + "\n"
+        f"      Read each line. If one describes this row's mechanism, the verdict is not "
+        f"{data.get('result')}. Otherwise answer each file in the sidecar:\n"
+        f"        name_hits_read:\n"
+        f"          - {{name: {first_name}, file: {first_file}, note: <why this line is not this bug>}}\n"
+        f"      Why: a sidecar that searched only joined phrases missed the README line that "
+        f"described the design in prose; the function's bare name alone would have hit it."]
 
 
 # ---------------------------------------------------------------- G2
@@ -953,6 +1365,98 @@ def check_g12(row_id: str, dedup_rel: str | None, eng: Path) -> list[str]:
         f"      Why: REF-2. An engagement that answered MATCH on the root cause alone lost every finding its contest paid for."]
 
 
+def check_g16(row_id: str, dedup_rel: str | None, eng: Path,
+              require_answers: bool = False) -> list[str]:
+    """REF-31. A row that attacks a known issue's fix, mitigation or bound is never retired as a
+    duplicate of that issue.
+
+    On engagement 22 rows generated as attacks on a known-issue entry (a critic attacking its stated
+    mitigation; a fix-adjacency row saying a fix is stricter than its wording) shared the entry's
+    root cause by construction, so a root-cause matcher retired them against the very entry they
+    attacked. Other researchers later filed them. Richard's rule (2026-10-19, tooling/match_rule.py):
+    such a row is ATTACKS-FIX, a test target, never KNOWN.
+
+    The dedup sidecar records two answers beside `result: MATCH`:
+      clause:        issue | accepted | mitigation | bound | fix   (which part of the entry the row's claim is about)
+      attacks_entry: yes | no                                       (was the row generated to attack this entry?)
+    SCOPE-HELD on a MATCH is refused when `clause` is mitigation, bound or fix, or `attacks_entry`
+    is yes: test the row instead (TIER-1, then REFUTED with evidence, or CONFIRMED).
+
+    `require_answers` (the CLI, i.e. new promotions) also refuses a MATCH sidecar that has not
+    answered both. The Stop-hook backstop passes False, so the many MATCH sidecars written before
+    this rule stay silent; it still enforces the refusal wherever the answers exist. SCOPE: like
+    G12, only a sidecar that says MATCH; a SCOPE-HELD with no sidecar is a scope judgement.
+    It cannot check that `attacks_entry` is answered truthfully: the ledger does not record a
+    row's generator or target. It makes the question unavoidable, as G12 does.
+    """
+    if not dedup_rel:
+        return []
+    data, err = load_sidecar(dedup_rel, eng)
+    if err or not data or str(data.get("result", "")).strip().upper() != "MATCH":
+        return []
+    clause = str(data.get("clause", "") or "").strip().lower()
+    raw = data.get("attacks_entry")
+    # YAML reads `yes`/`no` as booleans; `False or ""` would turn a real "no" into "unanswered".
+    attacks = ("yes" if raw else "no") if isinstance(raw, bool) else str(raw or "").strip().lower()
+    if clause in ATTACK_CLAUSES or attacks == "yes":
+        why = (f"its claim is about the entry's {clause}" if clause in ATTACK_CLAUSES
+               else "it was generated to attack this entry")
+        return [f"G16 [{row_id}] SCOPE-HELD on `result: MATCH`, but {why}.\n"
+                f"      A row that says a known issue's fix, mitigation or bound is wrong ATTACKS the entry;\n"
+                f"      it is not a duplicate of it (ATTACKS-FIX, tooling/match_rule.py). Test it instead:\n"
+                f"      promote to TIER-1, then REFUTED with evidence or CONFIRMED.\n"
+                f"      Why: REF-31, rows were retired this way that other researchers then filed."]
+    if require_answers and (clause not in CLAUSES or attacks not in ("yes", "no")):
+        return [f"G16 [{row_id}] the MATCH sidecar must answer two questions before SCOPE-HELD:\n"
+                f"        clause:        {' | '.join(CLAUSES)}   (which part of the entry the row's claim is about)\n"
+                f"        attacks_entry: yes | no   (was this row generated to attack this entry?)\n"
+                f"      tooling/known-issue-brief.py returns both with every row's match verdict. Why: REF-31."]
+    return []
+
+
+SCOPE_EXCLUSIONS = "00-triage/scope-exclusions.md"
+MIN_EXCLUSION_QUOTE_CHARS = 40
+
+
+def check_g20(row_id: str, reason: str | None, eng: Path) -> list[str]:
+    """G20 (REF-32, Richard 2026-10-26): a hold declared as resting on a scope exclusion quotes it.
+
+    Pre: the row is arriving at SCOPE-HELD and the caller declared that the hold rests on a scope
+    exclusion (`cli.py promote --exclusion`). Holds on other grounds (materiality, a partial known
+    issue, front-running) are not judged; which holds must declare is parked for Richard. Post: []
+    when some run of at least MIN_EXCLUSION_QUOTE_CHARS characters of the reason appears exactly,
+    whitespace-normalised, in SCOPE_EXCLUSIONS; otherwise one refusal naming that file, including
+    when the file does not exist.
+
+    No exemption for a row whose sidecar says MATCH: one would make calling a row KNOWN the cheapest
+    way past this, and a wrong KNOWN is the costly direction (review of this guard, 2026-10-26).
+
+    Engagement 25 (REF-32): the exclusion list was right and a "steer clear" note six lines later
+    widened two exclusions into one class-wide kill; four paid findings sat inside it. A ruling that
+    cannot quote a rule is our own inference, and the human should see that at Phase 4.
+    """
+    path = eng / SCOPE_EXCLUSIONS
+    n = MIN_EXCLUSION_QUOTE_CHARS
+    said = " ".join(str(reason or "").split())
+    if path.is_file():
+        rules = " ".join(path.read_text(errors="ignore").split())
+        if any(said[i:i + n] in rules for i in range(len(said) - n + 1)):
+            return []
+        why = "no REASON: given" if not said else f"no {n}-character run of the reason is in that file"
+    else:
+        why = "that file does not exist: write Phase 0's literal exclusion list there"
+    return [f"G20 [{row_id}] SCOPE-HELD on a scope exclusion must quote it: the REASON (--reason) needs "
+            f"at least {n} characters copied exactly from {SCOPE_EXCLUSIONS}, the Phase 0 exclusion "
+            f"list ({why}).\n"
+            f"      A ruling that cannot quote a rule is our own inference. Why: REF-32, on engagement 25 a "
+            f"\"steer clear\" note widened an exclusion and cost four paid findings."]
+
+
+# tooling/poc-scaffold.py writes this into every test body it generates, beside the statement
+# that makes the unfilled test fail. A cited file that still holds it has a test nobody wrote.
+SCAFFOLD_UNFILLED_MARK = "SCAFFOLD-UNFILLED"
+
+
 def check_evidence_function(row_id: str, evidence: str | None, status: str,
                             eng: Path) -> list[str]:
     """G15 (REF-1): a Forge citation names the test FUNCTION, and that function must exist.
@@ -979,6 +1483,13 @@ def check_evidence_function(row_id: str, evidence: str | None, status: str,
     different contract in the same file, an interface or abstract stub, a test inherited
     from a base contract in another file -- and, always, whether the named test asserts
     anything about this row.
+
+    One thing it does catch: a file written by tooling/poc-scaffold.py and not finished. The
+    scaffold declares `test_<ID>_exploit` and `test_<ID>_refuted` itself, so the declaration
+    check above passes on a file nobody has touched. Every generated test body carries
+    SCAFFOLD_UNFILLED_MARK until it is written or deleted, and a cited file that still holds
+    the mark anywhere is refused. Whole file, not the one function: the template says to
+    delete the test that does not apply, and a leftover unfilled test is that step skipped.
     """
     if status not in ("REFUTED", "CONFIRMED") or not evidence:
         return []
@@ -998,12 +1509,17 @@ def check_evidence_function(row_id: str, evidence: str | None, status: str,
         art = resolve_artifact(path, eng)
         if art is None:
             continue                   # G2/G10 already own "it does not resolve"
-        if not re.search(rf"\bfunction\s+{re.escape(fn)}\s*\(",
-                         art.read_text(errors="ignore")):
+        text = art.read_text(errors="ignore")
+        if not re.search(rf"\bfunction\s+{re.escape(fn)}\s*\(", text):
             out.append(
                 f"G15 [{row_id}] {art.name} declares no `function {fn}(`. Name a test "
                 f"function that exists in the file you cited, e.g. `{path}::test_{row_id}_"
                 f"refuted`.")
+        elif SCAFFOLD_UNFILLED_MARK in text:
+            out.append(
+                f"G15 [{row_id}] {art.name} still holds {text.count(SCAFFOLD_UNFILLED_MARK)} "
+                f"unfilled scaffold test(s) (marked {SCAFFOLD_UNFILLED_MARK}). A scaffold is not "
+                f"evidence. Write each test, or delete the ones that do not apply, then promote.")
     return out
 
 
@@ -1173,6 +1689,8 @@ def check_g11(path: Path, eng: Path) -> list[str]:
 
 
 def evaluate(path: Path, new_content: str) -> list[str]:
+    if is_dedup_sidecar(path):
+        return check_sidecar_write(path, new_content)
     if not is_ledger(path):
         eng = engagement_root(path)
         if eng and "poc" in path.parts and not path.exists():

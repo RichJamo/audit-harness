@@ -37,9 +37,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ledger_guard import (  # noqa: E402
-    ROW_RE, SPEND_STATUSES, engagement_root, is_ledger, parse_rows, row_status,
+    ROW_ID, ROW_RE, SPEND_STATUSES, engagement_root, is_ledger, parse_rows, row_status,
     check_g1, check_g2, check_format, engagement_ledgers, field,
-    check_g12, check_g14,
+    check_g12, check_g14, check_g16,
 )
 
 # A ledger is considered active if it changed in this window. Only used when the session
@@ -166,6 +166,10 @@ def state_violations(eng: Path) -> list[tuple[str, str]]:
                     # crashed Stop hook looks exactly like a clean one.
                     for m in check_g12(rid, field(line, "DEDUP"), eng):
                         found.append((vkey(eng, rel, rid, m), f"{rel}: {m}"))
+                    # G16 backstop: refuses only where the sidecar's answers exist, so sidecars
+                    # written before REF-31 stay silent here.
+                    for m in check_g16(rid, field(line, "DEDUP"), eng):
+                        found.append((vkey(eng, rel, rid, m), f"{rel}: {m}"))
                 for m in check_g2(rid, field(line, "DEDUP"), field(line, "EVIDENCE"),
                                   field(line, "HUMAN"), line, st, eng):
                     found.append((vkey(eng, rel, rid, m), f"{rel}: {m}"))
@@ -191,7 +195,7 @@ def vanished_rows(eng: Path, snap: dict) -> list[tuple[str, str]]:
         if "LEDGER-DELETE-APPROVED:" in content:
             continue
         for rid in sorted(set(prev[rel]) - now):
-            m = re.search(rf"{re.escape(rid)}\b.{{0,120}}?MERGED-INTO:\s*([A-Z][A-Z0-9]*-?[0-9]+)",
+            m = re.search(rf"{re.escape(rid)}\b.{{0,120}}?MERGED-INTO:\s*({ROW_ID})",
                           content)
             if m and m.group(1) in now:
                 continue

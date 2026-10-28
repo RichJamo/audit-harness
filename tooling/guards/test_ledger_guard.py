@@ -8,7 +8,7 @@ import ledger_guard  # noqa: E402  (G11 tests drive evaluate() and main() direct
 from ledger_guard import (  # noqa: E402
     evaluate, parse_rows, parse_row_lines, engagement_ledgers, resolve_artifact,
     TOOLKIT_ROOT, FORMAT_MARKER, is_ledger, row_status, engagement_root,
-    header_missing_fields, HEADER_REQUIRED_FIELDS, RUN_WITHOUT_MODEL,
+    header_missing_fields, HEADER_REQUIRED_FIELDS, RUN_WITHOUT_MODEL, check_g1,
 )
 
 PRIOR_ART = (
@@ -918,6 +918,21 @@ class TestHeaderIsNotALedger(Base):
         self.assertEqual([e for e in errs if e.startswith("G0c")], [], errs)
 
 
+class TestQueuesIsNotALedger(Base):
+    """03-evidence/queues.md lists each UNTESTED row's work queue; engagement-doctor.py reads it.
+    It lives outside ledger/ so that no exemption is needed: the ledger guards never see it."""
+
+    def test_queues_is_not_classified_as_a_ledger(self):
+        self.assertFalse(is_ledger(Path("03-evidence/queues.md")))
+        self.assertFalse(is_ledger(Path("/abs/eng/03-evidence/queues.md")))
+
+    def test_writing_queues_on_a_cli_managed_engagement_is_not_blocked(self):
+        (self.eng / "ledger" / "events.jsonl").write_text('{"event":"created","id":"H1"}\n')
+        errs = evaluate(self.eng / "03-evidence" / "queues.md",
+                        "| row | queue |\n|---|---|\n| H1 | final-pass |\n")
+        self.assertEqual([], errs)
+
+
 
 
 
@@ -1095,6 +1110,212 @@ class TestStatusComesFromTheCell(Base):
         self.assertEqual(row_status("### R-6 -- something `CONFIRMED`"), "CONFIRMED")
 
 
+class TestG19ClaimsQuoted(Base):
+    """G19 (Richard, 2026-10-26): a sidecar written as `result: MATCH` quotes the entry for every
+    caller and impact the row claims, or it is refused and the row is PARTIAL.
+
+    One arm of a grader experiment showed a model told in prose that a row claiming more
+    than the entry is partial would find the extra claim, quote it, and still answer "same". So the
+    decision is made here, in code, on the claims list the matcher writes. Judged when a sidecar is
+    written or changed (the PreToolUse hook on `ledger/dedup/<id>.md`), so sidecars already on disk
+    keep passing every other check.
+    """
+    SEARCHED = "00-triage/potential-risks/EX-potential-risks.txt"
+    OTHER = "00-triage/prior-audits-text/other-report.txt"
+    CALLER = "any live TAO can attach a TAO or TI credential to an arbitrary DID"
+    IMPACT = EXACT
+    ONLY_IN_OTHER = "the vault owner can sweep every pending withdrawal to the treasury"
+    IN_LEDGER = "our own row text says the keeper drains the reserve"
+    IN_NOTES = "the keeper can drain the reserve before the epoch closes"
+    NOTES = "00-triage/target-triage.md"
+    KEYS = "00-triage/prior-audit-keys/report-1.json"
+    FELLOW = "00-triage/fellow-issues/issue-9.json"
+    KNOWN_LIST = "00-triage/known-issues-verbatim.md"
+    README = "00-triage/potential-risks/README.md"
+    CORPUS = "00-triage/prior-audits/CORPUS.md"
+    INDEX = "00-triage/prior-audits-text/FINDINGS-INDEX.txt"
+
+    def setUp(self):
+        super().setUp()
+        other = self.eng / self.OTHER
+        other.parent.mkdir(parents=True)
+        other.write_text(f"Finding 4\n  {self.ONLY_IN_OTHER}, which nobody reviews.\n")
+        (self.eng / "ledger" / "notes.md").write_text(f"{self.IN_LEDGER}.\n")
+        for rel in (self.NOTES, self.KEYS, self.FELLOW, self.KNOWN_LIST, self.README, self.CORPUS, self.INDEX):
+            (self.eng / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.eng / rel).write_text(f"{self.IN_NOTES}.\n")
+
+    def write_sidecar(self, data: dict) -> list[str]:
+        import yaml
+        sc = self.eng / "ledger" / "dedup" / "T-3.md"
+        sc.parent.mkdir(parents=True, exist_ok=True)
+        return evaluate(sc, yaml.safe_dump(data, sort_keys=False))
+
+    def sidecar(self, result="MATCH", claims=None, searched=None):
+        data = {"searched": searched or [self.SEARCHED], "terms": ["a", "b", "c"],
+                "result": result, "quote": EXACT, "unmatched": "none",
+                "clause": "issue", "attacks_entry": "no"}
+        if claims is not None:
+            data["claims"] = claims
+        return data
+
+    def test_the_table(self):
+        both = [{"caller": "a live TAO calls setAttributeMetadata", "quote": self.CALLER},
+                {"impact": "credential attached without consent", "quote": self.IMPACT}]
+        cases = [
+            # (case, sidecar, refused?, words the refusal must name)
+            ("MATCH, every claim quoted from a searched file", self.sidecar(claims=both), False, ""),
+            ("MATCH, a claim marked not stated",
+             self.sidecar(claims=[both[0], {"impact": "the treasury is drained", "quote": "not stated"}]),
+             True, "the treasury is drained"),
+            ("MATCH, a quote not found",
+             self.sidecar(claims=[both[0], {"impact": "consent bypass",
+                                            "quote": "the target consents to nothing at all here"}]),
+             True, "consent bypass"),
+            ("MATCH, no claims list", self.sidecar(), True, "claims:"),
+            ("MATCH, an empty claims list", self.sidecar(claims=[]), True, "claims:"),
+            ("MATCH, a quote under 20 characters",
+             self.sidecar(claims=[{"caller": "any TAO", "quote": "any live TAO"}]), True, "20"),
+            ("MATCH, a claim that is neither a caller nor an impact",
+             self.sidecar(claims=[{"quote": self.CALLER}]), True, "caller: or impact:"),
+            ("MATCH, a quote found only in a file not in searched:",
+             self.sidecar(claims=[{"impact": "withdrawals swept", "quote": self.ONLY_IN_OTHER}]),
+             True, "withdrawals swept"),
+            ("MATCH, the same quote once that file is searched",
+             self.sidecar(claims=[{"impact": "withdrawals swept", "quote": self.ONLY_IN_OTHER}],
+                          searched=[self.SEARCHED, self.OTHER]), False, ""),
+            ("PARTIAL with a claims list", self.sidecar("PARTIAL", claims=[both[0]]), False, ""),
+            ("PARTIAL without a claims list", self.sidecar("PARTIAL"), False, ""),
+            ("NO-MATCH without a claims list", self.sidecar("NO-MATCH"), False, ""),
+            # A quote must come from the verbatim entries under 00-triage/, not from our own files:
+            # the row's words copied from the ledger would otherwise "quote" the entry.
+            ("MATCH, a quote from a searched file outside 00-triage/",
+             self.sidecar(claims=[{"impact": "rows say so", "quote": self.IN_LEDGER}],
+                          searched=[self.SEARCHED, "ledger/notes.md"]), True, "rows say so"),
+            # Only a placeholder in result: silences the hook (the skeleton leaves result: unfilled for
+            # KNOWN, so writing MATCH is the last edit). A placeholder in claims: is an unquoted claim,
+            # and switches nothing off (found in review: one `<FILL IN>` silenced a "not stated").
+            ("MATCH whose claims still hold a skeleton placeholder",
+             self.sidecar(claims=[{"caller": "<FILL IN> a caller", "quote": "<FILL IN> quote"}]),
+             True, "a caller"),
+            ("MATCH with a not-stated claim beside a placeholder claim",
+             self.sidecar(claims=[{"impact": "liquidate healthy positions", "quote": "not stated"},
+                                  {"caller": "<FILL IN>"}]), True, "liquidate healthy positions"),
+            ("MATCH with one quoted claim and the skeleton's second item untouched",
+             self.sidecar(claims=[both[0], {"impact": "<FILL IN> an impact", "quote": "<FILL IN>"}]),
+             True, "an impact"),
+            ("a result: still holding the placeholder is silent while the sidecar is filled",
+             self.sidecar("<FILL IN> MATCH once every claim is quoted", claims=[{"caller": "<FILL IN>"}]),
+             False, ""),
+            ("MATCH with filled claims and a placeholder left in terms:",
+             {**self.sidecar(claims=[{"impact": "consent bypass", "quote": "not stated"}]),
+              "terms": ["<FILL IN>", "b", "c"]}, True, "consent bypass"),
+            # Under 00-triage/, only the entries copied verbatim count: our triage notes, the agent's
+            # prior-audit keys, the scope exclusions and the README do not (found in review).
+            ("MATCH quoting our own triage notes in 00-triage/",
+             self.sidecar(claims=[{"impact": "notes say so", "quote": self.IN_NOTES}],
+                          searched=[self.SEARCHED, self.NOTES]), True, "notes say so"),
+            ("MATCH quoting the agent's prior-audit keys",
+             self.sidecar(claims=[{"impact": "keys say so", "quote": self.IN_NOTES}],
+                          searched=[self.SEARCHED, self.KEYS]), True, "keys say so"),
+            # Inside an admitted folder, our own notes still do not count (found in review).
+            ("MATCH quoting our README inside potential-risks/",
+             self.sidecar(claims=[{"impact": "readme says so", "quote": self.IN_NOTES}],
+                          searched=[self.SEARCHED, self.README]), True, "readme says so"),
+            ("MATCH quoting a corpus note in prior-audits/",
+             self.sidecar(claims=[{"impact": "corpus says so", "quote": self.IN_NOTES}],
+                          searched=[self.SEARCHED, self.CORPUS]), True, "corpus says so"),
+            ("MATCH quoting a findings index we generated",
+             self.sidecar(claims=[{"impact": "index says so", "quote": self.IN_NOTES}],
+                          searched=[self.SEARCHED, self.INDEX]), True, "index says so"),
+            ("MATCH quoting other researchers' filed issues, copied verbatim",
+             self.sidecar(claims=[{"impact": "fellow found it", "quote": self.IN_NOTES}],
+                          searched=[self.SEARCHED, self.FELLOW]), False, ""),
+            ("MATCH quoting the programme's known-issues list, copied verbatim",
+             self.sidecar(claims=[{"impact": "programme lists it", "quote": self.IN_NOTES}],
+                          searched=[self.SEARCHED, self.KNOWN_LIST]), False, ""),
+        ]
+        for case, data, refused, named in cases:
+            with self.subTest(case):
+                errs = [e for e in self.write_sidecar(data) if e.startswith("G19")]
+                self.assertEqual(bool(errs), refused, errs)
+                if refused:
+                    self.assertIn(named, errs[0])
+                    self.assertIn("PARTIAL", errs[0])
+
+    def test_a_match_sidecar_that_does_not_parse_is_refused(self):
+        """No later check reads a KNOWN row's sidecar (the row is never promoted), so YAML that does
+        not parse cannot be left for G1."""
+        sc = self.eng / "ledger" / "dedup" / "T-3.md"
+        sc.parent.mkdir(parents=True, exist_ok=True)
+        errs = evaluate(sc, "result: MATCH\nquote: \"unterminated\nclaims: [\n")
+        self.assertTrue(any(e.startswith("G19") and "YAML" in e for e in errs), errs)
+        self.assertEqual(evaluate(sc, "result: NO-MATCH\nterms: [\n"), [])
+
+    def test_an_edit_is_judged_on_the_content_it_leaves(self):
+        """The hook's Edit path: main() applies the patch, then the sidecar it would leave is judged."""
+        import yaml
+        sc = self.eng / "ledger" / "dedup" / "T-3.md"
+        sc.parent.mkdir(parents=True, exist_ok=True)
+        sc.write_text(yaml.safe_dump(self.sidecar("PARTIAL"), sort_keys=False))
+        payload = {"tool_input": {"file_path": str(sc), "old_string": "result: PARTIAL",
+                                  "new_string": "result: MATCH"}}
+        with unittest.mock.patch("sys.stdin.read", return_value=__import__("json").dumps(payload)):
+            self.assertEqual(ledger_guard.main(), 2)
+
+    def test_a_sidecar_outside_an_engagement_is_silent(self):
+        import yaml
+        loose = Path(tempfile.mkdtemp()) / "ledger" / "dedup" / "T-3.md"
+        self.addCleanup(shutil.rmtree, loose.parents[2], ignore_errors=True)
+        self.assertEqual(evaluate(loose, yaml.safe_dump(self.sidecar())), [])
+
+
+class TestG20ExclusionQuoted(Base):
+    """G20 (REF-32, Richard 2026-10-26): a hold declared to rest on a scope exclusion
+    (`cli.py promote --to SCOPE-HELD --exclusion`) quotes that exclusion, at least 40 characters
+    copied exactly from 00-triage/scope-exclusions.md.
+
+    Engagement 25 (2026-10-06): the exclusion list was copied faithfully, then a "steer clear" note six
+    lines later widened two exclusions into one class-wide kill, and four paid findings sat inside
+    it. A ruling that cannot quote a rule is our own inference. Holds on other grounds are not
+    judged (which holds must declare is parked), and there is no exemption for a MATCH sidecar,
+    which would make calling a row KNOWN the cheapest way past it.
+    """
+    EXCLUSIONS = ("# Phase 0 scope-exclusion checklist\n\n"
+                  "- Incorrect data supplied by third party oracles is out of scope, as is any\n"
+                  "  testing with pricing oracles or third party smart contracts.\n")
+    QUOTE = "Incorrect data supplied by third party oracles is out of scope"
+    WRAPPED = "is out of scope, as is any testing with pricing oracles"
+
+    def test_the_table(self):
+        cases = [
+            # (case, exclusion file?, reason, refused?)
+            ("a reason quoting 40+ characters of the list", True, f'oracle data: "{self.QUOTE}"', False),
+            ("a quote that spans a line break in the list", True, f"rule: {self.WRAPPED}", False),
+            ("no reason", True, None, True),
+            ("a paraphrase of the exclusion", True, "oracle stuff is out of scope per the brief, steer clear",
+             True),
+            ("only 39 characters quoted", True, self.QUOTE[:39], True),
+            ("no exclusion file to quote", False, f"rule: {self.QUOTE}", True),
+        ]
+        for case, has_file, reason, refused in cases:
+            with self.subTest(case):
+                (self.eng / "00-triage" / "scope-exclusions.md").unlink(missing_ok=True)
+                if has_file:
+                    (self.eng / "00-triage" / "scope-exclusions.md").write_text(self.EXCLUSIONS)
+                errs = ledger_guard.check_g20("C-1", reason, self.eng)
+                self.assertEqual(bool(errs), refused, errs)
+                if refused:
+                    self.assertIn("00-triage/scope-exclusions.md", errs[0])
+
+    def test_the_hooks_do_not_charge_it(self):
+        """A hand-edited row cannot declare --exclusion, so only cli.py charges G20 (as G17)."""
+        (self.eng / "00-triage" / "scope-exclusions.md").write_text(self.EXCLUSIONS)
+        self.write("| **C-1** | oracle price handling | `UNTESTED` |\n")
+        errs = self.check("| **C-1** | oracle price handling | `SCOPE-HELD` | HUMAN: RJ 2026-10-26 |\n")
+        self.assertEqual([e for e in errs if e.startswith("G20")], [], errs)
+
+
 class TestCrossCheckAnswered(Base):
     """G1's identifier cross-check must be answerable by EVIDENCE, not by writing less.
 
@@ -1165,6 +1386,50 @@ class TestCrossCheckAnswered(Base):
             ("somethingElse", "EX-potential-risks.txt:1"),
             ("anotherThing", "EX-potential-risks.txt:2")])))
         self.assertTrue(any("Still unanswered" in x for x in e), e)
+
+
+class TestG1CrossCheckWithTerms(Base):
+    """G1's identifier cross-check also uses the sidecar's `terms:` on new promotions (CLI only).
+
+    Engagement 23: a row naming one identifier could not co-occur, so its NO-MATCH passed; a
+    sibling row naming three was caught against a prior-audit note on the same defect.
+    """
+
+    ROW = "`checkEligibility` skips the trust-chain check"   # one identifier: cannot co-occur alone
+
+    def g1(self, terms, *, with_terms, answered=()):
+        d = self.eng / "ledger" / "dedup"
+        d.mkdir(parents=True, exist_ok=True)
+        body = ("searched:\n  - 00-triage/potential-risks/EX-potential-risks.txt\n"
+                "terms:\n" + "".join(f"  - {t}\n" for t in terms) + "result: NO-MATCH\n")
+        if answered:
+            body += "cross_check_answered:\n" + "".join(
+                f"  - identifier: {i}\n    section: EX-potential-risks.txt:1\n" for i in answered)
+        (d / "X-9.md").write_text(body)
+        errs = check_g1("X-9", "ledger/dedup/X-9.md", self.ROW, self.eng, with_terms=with_terms)
+        return [e for e in errs if "co-occur" in e]
+
+    TERMS = ["setAttributeMetadata", "trust chain", "did"]
+
+    def test_a_one_identifier_row_is_caught_through_its_terms(self):
+        errs = self.g1(self.TERMS, with_terms=True)
+        self.assertEqual(1, len(errs), errs)
+        self.assertIn("checkEligibility", errs[0])
+        self.assertIn("setAttributeMetadata", errs[0])
+
+    def test_the_hooks_keep_the_row_only_set(self):
+        """Sidecars written before the change keep passing the PreToolUse and Stop hooks."""
+        self.assertEqual([], self.g1(self.TERMS, with_terms=False))
+
+    def test_only_function_shaped_terms_count(self):
+        """A phrase, a contract name or an auditor co-occurs with everything about that contract."""
+        for term in ("set attribute metadata", "SetAttributeMetadata", "ChainSecurity"):
+            with self.subTest(term=term):
+                self.assertEqual([], self.g1([term, "trust chain", "did"], with_terms=True))
+
+    def test_answering_the_cross_check_clears_it(self):
+        self.assertEqual([], self.g1(self.TERMS, with_terms=True,
+                                     answered=("checkEligibility", "setAttributeMetadata")))
 
 
 class TestG11ChannelGuard(unittest.TestCase):
@@ -1368,6 +1633,153 @@ class TestG14FindingBodies(Base):
         self.assertEqual(len(p.read_text()), len(body), "the payloads must be the same size")
         self.assertEqual(self.promote(self.sidecar([self.SECTION])), [],
                          "a stale cached verdict survived an equal-length edit")
+
+
+class TestG17EntryFunctionsAreSearchedAlone(unittest.TestCase):
+    """G17: each function the row's entry names is searched on its own, by the tool, in the
+    documents that could answer the dedup; a hit must be answered in `name_hits_read:`.
+
+    Engagement 22 (2026-10-20), shown with synthetic names: the sidecar searched joined phrases
+    such as "openPosition lockPeriod"; the README line describing the design wrote it in prose,
+    so no phrase matched, and that line answered the filed issue. `openPosition` alone hit it.
+    """
+
+    G17_ROW = ("`IPool.openPosition` by the pool owner, forwarded to "
+               "`Registry.openPosition`")
+    README_LINE = ("Opening a position calls the pool's `openPosition`, which passes the "
+                   "initial lock period explicitly.")
+    MULTI = ("RateModel.setFeeBonus \u2014 GOVERNOR; Escrow.extendKeeper \u2014 KEEPER; "
+             "Token.quickRedeem \u2014 anyone")
+
+    def setUp(self):
+        self.eng = Path(tempfile.mkdtemp())
+        (self.eng / "ledger" / "dedup").mkdir(parents=True)
+        (self.eng / "target").mkdir()
+        (self.eng / "target" / "README.md").write_text("# Market\n\n" + self.README_LINE + "\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.eng, ignore_errors=True)
+
+    def g17(self, entry, *, result="PARTIAL", answers=(), terms=("a", "b", "c")):
+        """AB-20's own sidecar recorded PARTIAL. `answers` are (name, file, note) triples."""
+        rel = "ledger/dedup/AB-20.md"
+        body = "terms:\n" + "".join(f"  - {t}\n" for t in terms) + f"result: {result}\n"
+        if answers:
+            body += "name_hits_read:\n" + "".join(
+                f"  - name: {n}\n    file: {f}\n    note: \"{note}\"\n" for n, f, note in answers)
+        (self.eng / rel).write_text(body)
+        return ledger_guard.check_g17("AB-20", rel, entry, self.eng)
+
+    def test_ab_20_is_refused_showing_the_readme_line(self):
+        errs = self.g17(self.G17_ROW)
+        self.assertEqual(1, len(errs), errs)
+        self.assertIn("G17 [AB-20]", errs[0])
+        self.assertIn("names openPosition,", errs[0])
+        self.assertIn("target/README.md:3", errs[0], "the refusal points at the line")
+        self.assertIn("passes the initial lock period", errs[0], "and shows it")
+        self.assertIn("name_hits_read", errs[0], "and says how to answer it")
+
+    def test_a_term_list_alone_does_not_pass(self):
+        """The reason for this form: listing the word is paperwork, reading the hit is not."""
+        self.assertTrue(self.g17(self.G17_ROW, terms=("openPosition", "lock", "owner")))
+
+    def test_it_passes_once_the_hit_is_answered_with_a_note(self):
+        self.assertEqual([], self.g17(self.G17_ROW, answers=[
+            ("openPosition", "target/README.md", "describes the owner path, not the registry call")]))
+
+    def test_an_answer_needs_a_note_and_the_right_file(self):
+        for answer in [("openPosition", "target/README.md", ""),
+                       ("openPosition", "00-triage/known-issues.md", "wrong file"),
+                       ("openposition", "target/README.md", "wrong case")]:
+            with self.subTest(answer=answer):
+                self.assertTrue(self.g17(self.G17_ROW, answers=[answer]))
+
+    def test_every_file_with_a_hit_needs_its_own_answer(self):
+        (self.eng / "00-triage").mkdir()
+        (self.eng / "00-triage" / "known-issues.md").write_text("K3: openPosition is owner-only.\n")
+        errs = self.g17(self.G17_ROW, answers=[("openPosition", "target/README.md", "owner path")])
+        self.assertEqual(1, len(errs), errs)
+        self.assertIn("00-triage/known-issues.md:1", errs[0])
+        self.assertNotIn("target/README.md:3", errs[0], "an answered file is not shown again")
+
+    def test_only_no_match_and_partial_are_checked(self):
+        for result in ("NO-MATCH", "PARTIAL"):
+            with self.subTest(result=result):
+                self.assertTrue(self.g17(self.G17_ROW, result=result))
+        self.assertEqual([], self.g17(self.G17_ROW, result="MATCH"))
+
+    def test_the_search_is_whole_word_and_case_sensitive(self):
+        for text in ("openPositions is plural", "openposition in lower case", "xopenPosition"):
+            with self.subTest(text=text):
+                (self.eng / "target" / "README.md").write_text(text + "\n")
+                self.assertEqual([], self.g17(self.G17_ROW))
+
+    def test_silent_with_no_hit_or_no_source_document(self):
+        (self.eng / "target" / "README.md").write_text("Nothing about positions here.\n")
+        self.assertEqual([], self.g17(self.G17_ROW))
+        (self.eng / "target" / "README.md").unlink()
+        self.assertEqual([], self.g17(self.G17_ROW))
+
+    def test_our_own_ledger_and_notes_are_not_sources(self):
+        (self.eng / "target" / "README.md").unlink()
+        (self.eng / "ledger" / "ledger.md").write_text("| AB-20 | openPosition | UNTESTED |\n")
+        (self.eng / "00-triage").mkdir()
+        (self.eng / "00-triage" / "NO-PRIOR-ART.md").write_text("openPosition\n")
+        self.assertEqual([], self.g17(self.G17_ROW))
+
+    def test_prior_audit_text_is_left_to_g1_and_g14(self):
+        """Richard, 2026-10-20: searching report bodies too made G17 fire on about 83% of rows."""
+        (self.eng / "target" / "README.md").unlink()
+        for rel in ("00-triage/prior-audits-text/report.txt", "00-triage/potential-risks/notes.txt"):
+            path = self.eng / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("openPosition is discussed here.\n")
+        self.assertEqual([], self.g17(self.G17_ROW))
+
+    def test_an_entry_with_no_identifier_is_silent(self):
+        for entry in ("anyone, permissionless", "GOVERNOR only", "the pool owner (via the UI)",
+                      "`Registry` contract, KEEPER", "", None):
+            with self.subTest(entry=entry):
+                self.assertEqual([], self.g17(entry))
+
+    def test_a_multi_identifier_entry_lists_only_names_with_open_hits(self):
+        need = ["setFeeBonus", "extendKeeper", "quickRedeem"]
+        self.assertEqual(need, ledger_guard.entry_identifiers(self.MULTI),
+                         "role words and contract names are not identifiers")
+        (self.eng / "target" / "README.md").write_text(
+            "Keepers call extendKeeper.\nAnyone may quickRedeem.\n")
+        errs = self.g17(self.MULTI, answers=[("extendKeeper", "target/README.md", "keeper cap")])
+        self.assertEqual(1, len(errs), errs)
+        self.assertIn("names quickRedeem,", errs[0])
+        self.assertNotIn("extendKeeper in", errs[0], "an answered hit is not listed")
+
+    def test_extraction_ignores_prose_files_and_globals(self):
+        self.assertEqual([], ledger_guard.entry_identifiers(
+            "anyone (via the router); function(s) in Registry.sol, msg.sender, `owner`"))
+        self.assertCountEqual(["deposit", "_swapAndDeposit"], ledger_guard.entry_identifiers(
+            "deposit(amount) by any caller, then `Router._swapAndDeposit`"))
+
+    def test_solidity_builtins_and_casts_are_not_functions(self):
+        """Found in review: these entries were refused until a useless term was added."""
+        self.assertEqual([], ledger_guard.entry_identifiers("anyone, with amount = type(uint256).max"))
+        self.assertEqual(["withdraw"], ledger_guard.entry_identifiers(
+            "`Vault.withdraw` then abi.encode(x) and keccak256(y)"))
+        self.assertEqual(["redeem"], ledger_guard.entry_identifiers("uint256(x) cast in `Vault.redeem`"))
+        self.assertEqual(["unwrap"], ledger_guard.entry_identifiers("`WETH.unwrap` by any holder"),
+                         "a target function that shares a common word is still a function")
+
+    def test_no_sidecar_is_g1s_case(self):
+        self.assertEqual([], ledger_guard.check_g17("AB-20", None, self.G17_ROW, self.eng))
+        self.assertEqual([], ledger_guard.check_g17("AB-20", "ledger/dedup/absent.md",
+                                                    self.G17_ROW, self.eng))
+
+    def test_the_hooks_do_not_charge_it(self):
+        """New promotions only, by G14 every-body's mechanism: the CLI calls it, and neither the
+        PreToolUse row driver nor the Stop-hook backstop does, so old sidecars keep passing."""
+        import ledger_state_guard
+        for mod in (ledger_guard.evaluate, ledger_state_guard.state_violations):
+            with self.subTest(caller=mod.__name__):
+                self.assertNotIn("check_g17", mod.__code__.co_names)
 
 
 class TestScaffoldIsParsedRootedAndGuarded(unittest.TestCase):
