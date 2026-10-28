@@ -70,6 +70,8 @@ jobs:
           test "$(readlink /tmp/eng/ci-target/00-triage/prior-art)" = prior-audits
           # REF-31: the prior-audit index switches on the every-report check for new engagements
           test -f /tmp/eng/ci-target/00-triage/prior-audit-index.md
+          # REF-33: the roles file G18 reads is scaffolded from its template
+          test -f /tmp/eng/ci-target/01-scope/privileged-actors.md
           python - <<'PY'
           import sys
           from pathlib import Path

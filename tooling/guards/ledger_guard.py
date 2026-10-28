@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from table_cell import unescape_cell  # noqa: E402  REF-30: the read half of the escape.
 from match_rule import ATTACK_CLAUSES, CLAUSES  # noqa: E402  REF-31: G16 reads the one match rule.
+from source_paths import in_dependency_lib  # noqa: E402  one rule for every source walker
 
 # A ledger row is a markdown table line whose FIRST cell is a hypothesis id.
 #
@@ -1035,6 +1036,169 @@ def check_g17(row_id: str, dedup_rel: str | None, entry: str | None, eng: Path) 
         f"          - {{name: {first_name}, file: {first_file}, note: <why this line is not this bug>}}\n"
         f"      Why: a sidecar that searched only joined phrases missed the README line that "
         f"described the design in prose; the function's bare name alone would have hit it."]
+
+
+# ---------------------------------------------------------------- G18
+def _privileged_actors():
+    """tooling/privileged_actors.py, imported on first use so a hook that never reaches G18 does
+    not pay for it."""
+    import privileged_actors
+    return privileged_actors
+
+
+G18_STATUSES = ("SCOPE-HELD", "BELOW-BAR")     # the two exits by which a row leaves the work on a ruling
+G18_FILE_LINE = re.compile(r"([\w./-]+\.\w+):(\d+)")
+G18_QUOTE = re.compile(r'"([^"]{20,})"')
+G18_SKIP_DIRS = {"out", "cache", "node_modules", "broadcast", ".git", "artifacts"}
+# Written or chosen by the auditor, or test code: not evidence about the audited code (review, 2026-10-21).
+G18_NOT_SOURCE_DIRS = {"poc", "03-evidence", "test", "tests", "mock", "mocks", "ledger"}
+# Auditor working folders at the engagement's top level (01-hunt, 02-static, ...). 00-triage is not one:
+# it can hold the deployed source an engagement audits.
+G18_WORK_DIR = re.compile(r"0[1-9]-")
+# The programme's own text, copied verbatim into 00-triage/ (found in review): never the agent's
+# triage notes, scope exclusions or the toolkit's README there.
+G18_PROGRAMME_IN_TRIAGE = re.compile(r"00-triage/(?:brief\.md|(?:protocol-docs|potential-risks|prior-audits-text"
+                                     r"|program|[\w-]+-rules)/)")
+# Evidence must be in the audited source. A quote of the row itself, or a line of the engagement's own
+# notes, proved nothing and turned the check into typing (review of G18, 2026-10-21).
+G18_SOURCE_SUFFIXES = (".sol", ".vy", ".rs", ".go", ".move", ".cairo", ".fe", ".huff", ".yul")
+
+
+def _g18_files(eng: Path):
+    """Audited source files: no build or auditor folders, no test code, and no dependency `lib/`. A
+    `lib` folder inside `src/` is first-party code (a project's own `src/**/lib/`) and is kept."""
+    for p in eng.rglob("*"):
+        if not p.is_file() or p.suffix not in G18_SOURCE_SUFFIXES or p.name.endswith(".t.sol"):
+            continue
+        parts = p.relative_to(eng).parts[:-1]
+        if set(parts) & (G18_SKIP_DIRS | G18_NOT_SOURCE_DIRS) or (parts and G18_WORK_DIR.match(parts[0])):
+            continue
+        if in_dependency_lib(p, eng):     # the shared rule: a lib/ beside a foundry.toml
+            continue
+        yield p
+
+
+def _g18_programme_docs(eng: Path, sources: list[Path]):
+    """The programme's own documents, by provenance (found in review): the verbatim copies in
+    `00-triage/` (`G18_PROGRAMME_IN_TRIAGE`), and the README and `docs/` of the target's own code, meaning
+    a top-level folder that holds audited source. Where the trust model and an action's documented effect
+    are written, which a FAIL on clause (c) rests on."""
+    roots = {f.relative_to(eng).parts[0] for f in sources}
+    for p in eng.rglob("*"):
+        if not p.is_file() or p.suffix not in (".md", ".txt"):
+            continue
+        rel = p.relative_to(eng).as_posix()
+        parts = p.relative_to(eng).parts
+        if set(parts[:-1]) & (G18_SKIP_DIRS | G18_NOT_SOURCE_DIRS | {"lib"}):
+            continue
+        if G18_PROGRAMME_IN_TRIAGE.match(rel):
+            yield p
+        elif parts[0] in roots and parts[0] != "00-triage" and (
+                p.name.lower().startswith("readme") or "docs" in parts[1:-1]):
+            yield p
+
+
+def _g18_cites(value: str, files, eng: Path) -> bool:
+    """A `file:line` naming one of `files` with that many lines, or a 20+ character quote found in one."""
+    norm = lambda t: " ".join(t.split())  # noqa: E731
+    cites = G18_FILE_LINE.findall(value)
+    quotes = [norm(q) for q in G18_QUOTE.findall(value)]
+    if not cites and not quotes:
+        return False
+    for f in files:
+        rel = f.relative_to(eng).as_posix()
+        try:
+            text = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        for path, line in cites:
+            if (rel == path or rel.endswith("/" + path)) and 1 <= int(line) <= len(text.splitlines()):
+                return True
+        if quotes and any(_g18_quote_in_row(q, text) for q in quotes):   # same tolerance as NO-ACTION
+            return True
+    return False
+
+
+# A NO-ACTION quote is the matched words, so it may be short ("any borrower").
+G18_ROW_QUOTE = re.compile(r'"([^"]+)"')
+
+
+def _g18_quote_in_row(quote: str, row_text: str) -> bool:
+    """`quote` appears in the row as screeners write quotes: any case, backticks dropped, whitespace collapsed,
+    and "..." or "…" standing for skipped words, with the pieces in order (engagement 21 replay)."""
+    plain = lambda t: " ".join(t.replace("`", "").split()).lower()  # noqa: E731  roles match in any case
+    text, at = plain(row_text), 0
+    pieces = [plain(p) for p in re.split(r"\.\.\.|…", quote) if plain(p)]
+    for piece in pieces:
+        at = text.find(piece, at)
+        if at < 0:
+            return False
+        at += len(piece)
+    return bool(pieces)
+
+
+def _g18_evidence_ok(verdict: str, value: str, row_text: str, eng: Path) -> bool:
+    """Evidence per verdict (Richard, 2026-10-21). FAIL and NO-ACTION follow Phase 4's own definitions;
+    the other verdicts set nothing aside on admin grounds, so G18 records them without a check (Richard's
+    choice: Phase 4 also asks BOUND-CITED to cite its bound, which the screen, not this guard, holds).
+    - FAIL lets an admin row out of the work, so it cites what proves the clause fails: a line or quote in
+      the audited source (`_g18_files`) or in the programme's own documents (`_g18_programme_docs`).
+      Never the row, the auditor's notes, PoCs or test code.
+    - NO-ACTION is a claim about the row's wording, so it quotes words from the row.
+    - PASS, UNCLEAR, BOUND-CITED and SEMI-TRUSTED set nothing aside on admin grounds: recorded, no check."""
+    if verdict == "FAIL":
+        sources = list(_g18_files(eng))
+        return _g18_cites(value, sources + list(_g18_programme_docs(eng, sources)), eng)
+    if verdict == "NO-ACTION":
+        # Not required to contain the matched word: real screeners quote the words that show no role acts
+        # ("any lender"), and that rule failed 55 of engagement 21's 125 NO-ACTION cells (2026-10-21).
+        return any(_g18_quote_in_row(q, row_text) for q in G18_ROW_QUOTE.findall(value) if len(q.strip()) >= 3)
+    return True
+
+
+def check_g18(row_id: str, row_text: str, privileged_test: str | None, eng: Path) -> list[str]:
+    """A row that names a privileged action does not leave the work on a ruling (SCOPE-HELD or
+    BELOW-BAR) without the privileged-action test.
+
+    Engagement 23 (REF-33): about a third of its untested rows involved an admin step and were
+    ranked weak largely for that, while a prior audit's accepted Medium needed only an honest admin
+    pause. The privileged-action test judges such rows by clause (`tooling/privileged_actors.py`);
+    this makes its verdict a precondition of the two exits. It records that the test ran and what it found;
+    it does not enforce the outcome (a PASS can stand beside a ruling that the row is a duplicate).
+
+    Pre: `row_text` is the row's hypothesis, entry and invariant. Post: [] wherever no filled
+    `01-scope/privileged-actors.md` exists (engagements before the file, and any engagement before
+    Phase 0 writes it), when the row names no privileged
+    role, function or verb, or when `privileged_test` STARTS with exactly one of the screen's verdicts
+    with the evidence that verdict needs (`_g18_evidence_ok`): FAIL cites a line or quote in the audited
+    source or the programme's own documents; NO-ACTION quotes the matched words from the row; the other
+    verdicts need none. Otherwise one error. CLI only: the hooks never call it.
+    """
+    roles = eng / "01-scope" / "privileged-actors.md"
+    if not roles.is_file():
+        return []
+    ps = _privileged_actors()
+    try:
+        actors = ps.parse_privileged_actors(roles)
+    except ps.RolesFileError:
+        return []                      # an unfilled template: the screen itself refuses to run
+    terms = ps.privileged_terms(row_text, actors)
+    if not terms:
+        return []
+    value = (privileged_test or "").strip()
+    alternation = "|".join(re.escape(v) for v in ps.VERDICTS)
+    lead = re.match(rf"({alternation})(?![\w-])", value)
+    others = [v for v in ps.VERDICTS if re.search(rf"(?<![\w-]){re.escape(v)}(?![\w-])", value[lead.end():] if lead else value)]
+    if lead and not others and _g18_evidence_ok(lead.group(1), value, row_text, eng):
+        return []
+    return [f"G18 [{row_id}] the row names a privileged action ({', '.join(terms[:4])}), so it does not leave "
+            f"the work before the privileged-action test. Run it (`tooling/privileged_actors.py` lists the verdicts) and pass "
+            f"--privileged-test starting with ONE verdict ({' | '.join(ps.VERDICTS)}) and citing evidence that "
+            f"its verdict needs: FAIL cites a real file:line or quote in the audited source or the programme's "
+            f"documents (00-triage/, README, docs/); NO-ACTION quotes the matched words from the row, e.g. "
+            f"--privileged-test \"FAIL (c): the harm is the documented effect, src/Vault.sol:212\".\n"
+            f"      Why: an honest admin pause was the setup step of a prior audit's Medium, "
+            f"while admin-dependent rows had been set aside wholesale."]
 
 
 # ---------------------------------------------------------------- G2

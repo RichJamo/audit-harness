@@ -33,7 +33,9 @@ repository.
 | `tooling/refutation-critic.py` | a red-team critic that checks what a refutation's proof-of-concept did not exercise (G8b) |
 | `tooling/fix-adjacency.py` | a scanner that looks for findings adjacent to a prior fix |
 | `tooling/known-issue-brief.py` | renders the known-issue matcher's brief and returns each row's match verdict, clause and whether the row attacks the entry (the answers G16 reads) |
+| `tooling/privileged-screen.py` | writes the privileged-action screening worklist for an agent to fill; the part G18 needs, the roles-file parser and the verdicts, is `tooling/privileged_actors.py` |
 | `tooling/poc-scaffold.py` | writes a row's PoC or symbolic check inside the target's test tree; G15 refuses evidence that still carries its unfilled mark |
+| `tooling/ask-model.py` | gives a model the scope to read; it shares the dependency-`lib/` rule in `tooling/source_paths.py` |
 
 ## Agent briefs
 

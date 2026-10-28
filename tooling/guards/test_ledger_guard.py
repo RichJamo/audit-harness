@@ -1309,7 +1309,7 @@ class TestG20ExclusionQuoted(Base):
                     self.assertIn("00-triage/scope-exclusions.md", errs[0])
 
     def test_the_hooks_do_not_charge_it(self):
-        """A hand-edited row cannot declare --exclusion, so only cli.py charges G20 (as G17)."""
+        """A hand-edited row cannot declare --exclusion, so only cli.py charges G20 (as G17, G18)."""
         (self.eng / "00-triage" / "scope-exclusions.md").write_text(self.EXCLUSIONS)
         self.write("| **C-1** | oracle price handling | `UNTESTED` |\n")
         errs = self.check("| **C-1** | oracle price handling | `SCOPE-HELD` | HUMAN: RJ 2026-10-26 |\n")

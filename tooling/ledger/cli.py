@@ -31,7 +31,8 @@ from table_cell import escape_cell, unescape_cell  # noqa: E402
 import sidecar  # noqa: E402  (dedup-skeleton, find-quote)
 from prior_corpus import summary as unread_summary, uncovered as uncovered_reports  # noqa: E402  REF-31
 from ledger_guard import (  # noqa: E402
-    ROW_RE, FORMAT_MARKER, STATUSES, check_g1, check_g2, check_g12, check_g14, check_g16, check_g17,
+    ROW_RE, FORMAT_MARKER, STATUSES, check_g1, check_g2, check_g12, check_g14, check_g16, check_g17, check_g18,
+    G18_STATUSES, _privileged_actors,
     check_below_bar, check_blocked, check_evidence_function, check_refuted_reason,
     engagement_root, load_sidecar,
     header_missing_fields,
@@ -308,6 +309,11 @@ def cmd_promote(a) -> int:
     elif a.exclusion:
         errs.append(f"G20 [{a.id}] --exclusion declares a SCOPE-HELD ruling; it means nothing on {a.to}.")
 
+    # G18: a row that names a privileged action does not leave the work on a ruling before the
+    # privileged-action test (REF-33). Silent without a filled roles file.
+    if a.to in G18_STATUSES:
+        errs += check_g18(a.id, _privileged_actors().row_text(row), a.privileged_test, eng)
+
     # BELOW-BAR must cite the program bar it fails -- otherwise it is a silent drop.
     if a.to == "BELOW-BAR":
         errs += check_below_bar(a.id, a.reason, dedup, eng)
@@ -334,6 +340,7 @@ def cmd_promote(a) -> int:
     satisfied = ["G1"] if a.to == WAYPOINT else []
     append(eng, {"id": a.id, "event": "promote", "to": a.to, "dedup": dedup,
                  "evidence": a.evidence, "human": a.human, "reason": a.reason,
+                 "privileged_test": a.privileged_test,
                  "satisfied": satisfied, "by": a.by})
     print(f"{a.id} -> {a.to}")
     redraw(eng)
@@ -686,6 +693,9 @@ def main(argv=None) -> int:
     p.add_argument("--exclusion", action="store_true",
                    help="SCOPE-HELD: this hold rests on a scope exclusion, so --reason quotes it "
                         "from 00-triage/scope-exclusions.md (G20, REF-32)")
+    p.add_argument("--privileged-test", help="for SCOPE-HELD or BELOW-BAR on a row naming a privileged action (G18): "
+                                             "the screen's verdict and its evidence, e.g. "
+                                             "'FAIL (c): the documented effect, Vault.sol:212'")
     p.set_defaults(fn=cmd_promote)
 
     ph = sub.add_parser("phase")
