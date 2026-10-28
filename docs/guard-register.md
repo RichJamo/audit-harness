@@ -50,7 +50,7 @@ a guard. **A guard's row and its code belong in the same commit.**
 | **G0b** | a ledger that is not a table is invisible to every guard | `SHIPPED` | `ledger_guard.py` · `check_format` |
 | **G0c** | a NEW ledger must declare its format | `SHIPPED` | `ledger_guard.py` · `check_new_ledger` |
 | **G0d** | status is read from the status **cell**; a status token in the prose is ambiguous | `SHIPPED` | `ledger_guard.py` · `status_token_outside_cell` |
-| **G1** | dedup vs verbatim prior-art text before `TIER-1` | `SHIPPED` | `ledger_guard.py` · `check_g1` |
+| **G1** | dedup vs verbatim prior-art text before `TIER-1` | `SHIPPED` | `ledger_guard.py` · `check_g1`. Refuses a sidecar still holding `<FILL IN>` from `cli.py dedup-skeleton`. On new promotions (`cli.py promote`, `with_terms=True`) the identifier cross-check also counts the sidecar's function-shaped `terms:` (engagement 23; 18 of 1,292 NO-MATCH sidecars on disk, none reachable); the hooks keep the row-only set |
 | **G1b** | no file under `poc/` before some row is `TIER-1` | `SHIPPED` | `ledger_guard.py` · `check_g1b` |
 | **G2** | `REFUTED` cites evidence that resolves · `SCOPE-HELD` cites a human | `SHIPPED` | `ledger_guard.py` · `check_g2` |
 | **G3** | a row may never go from `UNTESTED` to gone | `SHIPPED` | `ledger_guard.py` · `check_g3` |
@@ -58,8 +58,14 @@ a guard. **A guard's row and its code belong in the same commit.**
 | **G11** | a **CLI-managed** ledger may not be edited as a document | `SHIPPED` | `ledger_guard.py` · `check_g11`; bootstrap half reported by `engagement-doctor.py` |
 | **G12** | a Known-Issue `MATCH` retiring a row must record what it does **not** cover | `SHIPPED` | `ledger_guard.py` · `check_g12`, called by `cli.py promote` and the state guard *(the state-guard call **crashed the whole hook** from the day it shipped until 2026-09-10 — see below)* |
 | **G13** | `SUBMITTED` is not a status; a `FILED:` row cites the platform issue URL | `SHIPPED` | `ledger_guard.py` · `check_g13`, called by the row driver before the transition `continue`; 8 tests |
-| **G14** | a `NO-MATCH` dedup is cleared against finding **bodies**, not section extracts alone | `SHIPPED` | `ledger_guard.py` · `check_g14`, charged with G1 at `TIER-1` by `cli.py promote`, the row driver and the state guard; mirrored as a doctor `WARN` |
+| **G14** | a `NO-MATCH` dedup is cleared against finding **bodies**, not section extracts alone | `SHIPPED` | `ledger_guard.py` · `check_g14`, charged with G1 at `TIER-1` by `cli.py promote`, the row driver and the state guard; mirrored as a doctor `WARN`. **New promotions (2026-10-19, REF-31):** `cli.py promote` passes `every=True`, so a `PARTIAL` as well as a `NO-MATCH` must list **every** body file; the state guard keeps the any-body, `NO-MATCH`-only rule (measured 2026-10-19: every-body fires on 70 of 530 `PARTIAL`s and 96 of 1,433 `NO-MATCH`es on disk, against 3 for the old rule) |
 | **G15** | a **new** `REFUTED`/`CONFIRMED` promotion citing a Forge test names the test **function**, and it exists | `SHIPPED` 2026-09-29 | `ledger_guard.py` · `check_evidence_function` (logged as REF-1 in `bench/improvement-backlog.md`), called by `cli.py promote` and by the row driver for a ledger file that **already existed**. Never by the state guard: 225 rows on disk are closed citing a bare file and must keep passing (`bench/yb6-refutation-coverage-2026-09.md`) |
+| **G16** | a row whose claim is about a known issue's **fix, mitigation or bound**, or that was generated to attack the entry, is never parked as a `MATCH` of it | `SHIPPED` 2026-10-19 | `ledger_guard.py` · `check_g16` (REF-31), called by `cli.py promote` at `SCOPE-HELD` (new promotions must also answer `clause:` and `attacks_entry:`) and by the state guard, which refuses only where those answers exist |
+| **G17** | on a `NO-MATCH` or `PARTIAL` dedup, the tool searches each function the row's `entry` names, on its own, in the known issues, filed issues and target README; every hit must be answered in `name_hits_read:` | `SHIPPED` 2026-10-20 | `ledger_guard.py` · `check_g17`, called by `cli.py promote` with the dedup obligation, on `TIER-1` and on any exit that cites a sidecar (`SCOPE-HELD`, `BELOW-BAR`, `BLOCKED`), for rows that do not yet hold G1. Never by the row driver or the state guard: 279 rows on disk would fail it, 14 of them reachable because they do not hold G1 |
+| **G18** | a row naming a privileged role, function or verb does not leave the work on a ruling (`SCOPE-HELD` or `BELOW-BAR`) without the privileged-action test: `--privileged-test` starting with one of the screen's verdicts and with the evidence that verdict needs, as Phase 4 defines it (Richard, 2026-10-21): **FAIL** cites a real `file:line` or quote in the audited source or the programme's own documents, by provenance: the verbatim copies in `00-triage/` (`brief.md`, `protocol-docs/`, `potential-risks/`, `prior-audits-text/`, `program/`, `*-rules/`) and the README and `docs/` of the target's code, never the row, the auditor's notes or triage files, PoCs, `ledger/`, `0N-*` work folders, `03-evidence/` or test code; **NO-ACTION** quotes words found in the row (any case, backticks ignored, `...` for skipped words); PASS, UNCLEAR, BOUND-CITED and SEMI-TRUSTED need none (Richard's choice; Phase 4 also asks BOUND-CITED to cite its bound, which the screen holds). A `lib/` inside `src/` counts as source; a dependency `lib/` does not. On engagement 21's 263 real screen cells, 257 meet this rule: FAIL 69 of 69, NO-ACTION 119 of 125. A roles file may qualify a function by its contract (`Keeper.withdraw`), which then selects only rows naming that contract's function. It records that the test ran; it does not enforce the outcome | `SHIPPED` 2026-10-20 | `ledger_guard.py` · `check_g18`, called by `cli.py promote` only. Silent wherever no filled `01-scope/privileged-actors.md` exists. In reach on 2026-10-20: engagement 21, 316 of 915 rows (it started on 2026-10-14 and wrote its roles file on 2026-10-20), and engagement 24, 7 of 9 |
+| **G19** | a dedup sidecar written or changed as `result: MATCH` lists every caller and impact the row claims in `claims:`, each with a `quote:` of at least 20 characters found exactly (whitespace-normalised) in a verbatim entry file it `searched:` (the programme's, prior audits' or other researchers' text under `00-triage/`, never our own notes or keys: `G19_VERBATIM_SOURCE`); a claim marked `not stated`, a quote not found there, or a MATCH sidecar that is not valid YAML is refused, and the row is `PARTIAL` | `SHIPPED` 2026-10-26 | `ledger_guard.py` · `check_g19`, called by the `PreToolUse` hook on a Write or Edit of `ledger/dedup/<id>.md` (`check_sidecar_write`), silent only while `result:` holds a `dedup-skeleton` placeholder, which the skeleton leaves there for KNOWN, so writing `MATCH` is the last edit and is judged in full. Never by `cli.py promote` or the state guard, so sidecars already on disk keep passing until edited; an edit to one is judged on the whole file and must add `claims:` (whether a new `SCOPE-HELD` should also charge it is parked). Not on a sidecar written through Bash; `cli.py known-review` shows every `MATCH` row's list, and whether G19 would pass it, to the human at close-out. In reach on 2026-10-26: 408 `MATCH` sidecars on disk, none with `claims:`, judged only if rewritten |
+| **G20** | a row promoted to `SCOPE-HELD` with `--exclusion` (the hold rests on a scope exclusion) quotes it: its `--reason` holds at least 40 characters found exactly (whitespace-normalised) in `00-triage/scope-exclusions.md`, and is refused when that file does not exist (backlog REF-32) | `SHIPPED` 2026-10-26 | `ledger_guard.py` · `check_g20`, called by `cli.py promote` only. No exemption for a `MATCH` sidecar, which would make calling a row KNOWN the way past it. Holds not declared with `--exclusion` are not judged; which holds must declare is parked for Richard. In reach on 2026-10-26: no hold on disk is declared, so none; if all 771 `SCOPE-HELD` rows were, all 771 would be refused, 451 of them on the three engagements with the file that hold rows (four have it) |
+| **REF-31 corpus** | every prior-audit report (each file, each folder, each round folder such as `v2/`) is read into an extract and a key before `TIER-1` | `SHIPPED` 2026-10-19 | `tooling/prior_corpus.py` · `uncovered`, called by `cli.py promote` at `TIER-1` and reported `BAD` by `engagement-doctor.py`. **Enforced only where `00-triage/prior-audit-index.md` exists** (`new-engagement.sh` writes it): measured 2026-10-19, 18 of the 20 engagements with report files would fire, because per-report keys became standard on 2026-10-14 |
 | **G8** | opposite tail named on every `REFUTED` row | `DESIGNED` · kept | no gate code. Both halves run as generators, wired into `SKILL.md` by #61: G8a `opposite-tail.py`, G8b `refutation-critic.py` |
 | **G5** | confidentiality egress: no contest code leaves the engagement | `DESIGNED` · deferred | no code — highest false-positive risk of the set |
 | **G4** | coverage canary in the PoC cited by a `REFUTED` row | `RETIRED` 2026-09-24 | never built — no agreed spelling for a canary to check |
@@ -100,15 +106,51 @@ Guards sit on **transitions**, never on creation.
 
 | Transition | Guard | Question it answers | Status |
 |---|---|---|---|
-| → `TIER-1` (**mandatory waypoint**) | **G1** dedup vs full prior-art text · **G14** a `NO-MATCH` searched a finding BODY · **G1b** no harness before any `TIER-1` | is this worth spending on? | **`SHIPPED`** |
+| → `TIER-1` (**mandatory waypoint**) | **G1** dedup vs full prior-art text · **G14** a `NO-MATCH` searched a finding BODY · **G17** each function in `entry` searched on its own; every hit answered (`NO-MATCH`/`PARTIAL`) · **G1b** no harness before any `TIER-1` | is this worth spending on? | **`SHIPPED`** |
 | → `CONFIRMED` | **G10** cites a PoC that exists · ~~**G6** supply feasibility~~ | is the positive real, and backed? | G10 **`SHIPPED`**, G6 `RETIRED` |
 | → `REFUTED` | **G2** evidence cited · ~~**G4** coverage canary~~ | is the negative real? | G2 **`SHIPPED`**, G4 `RETIRED` |
 | *(not a gate — Phase 3 generator)* | **G8b** red-team critic over `REFUTED` rows | which direction did the PoC not exercise? | `TOOL`, wired (#61) — `tooling/refutation-critic.py`, `skill/phases/phase-3-evidence.md`; **never a filter**, it fired on 5/5 rows |
 | *(not a transition — Phase 1)* | **G8a** opposite tail, as a detector over `hunters/*.md` | was a quantity resolved in one direction only? | `TOOL`, wired (#61) — `tooling/opposite-tail.py`, `skill/phases/phase-1-hunt.md` |
-| → `SCOPE-HELD` | **G2** human decision recorded | did a human actually make the call? | **`SHIPPED`** |
+| → `SCOPE-HELD` | **G2** human decision recorded · **G12** a `MATCH` records what it does not cover · **G16** a `MATCH` is not an attack on the entry's fix · **G20** a hold declared `--exclusion` quotes it · **G17** as at `TIER-1`, when the row cites a sidecar and does not yet hold G1 (also on `BELOW-BAR` and `BLOCKED`) · **G18** a row naming a privileged action carries the privileged-action test (also on `BELOW-BAR`) | did a human actually make the call, and is this really a duplicate? | **`SHIPPED`** |
 | → gone | **G3** rows never vanish | did something disappear silently? | **`SHIPPED`** |
 | end of turn | ~~**G7** composition pass run~~ | did we skip the value-adding step? | `RETIRED` |
 | *(row creation)* | **none, by design** | — | n/a |
+
+### G16 — a row that attacks a known issue's fix is never parked as a duplicate of it (REF-31)
+
+**Rule.** A row promoted to `SCOPE-HELD` whose dedup sidecar says `result: MATCH` is refused when the
+sidecar's `clause:` is `mitigation`, `bound` or `fix`, or its `attacks_entry:` is `yes`. Such a row is
+ATTACKS-FIX (`tooling/match_rule.py`): it is tested (`TIER-1`, then `REFUTED` with evidence or
+`CONFIRMED`), never retired. A new promotion through the CLI must also answer both fields.
+
+**Origin.** Engagement 22, 2026-10. Rows generated as attacks on a known-issue entry (a critic attacking its
+stated mitigation; a fix-adjacency row saying a fix is stricter than its wording) shared the entry's root
+cause by construction, so a root-cause matcher retired them against the very entry they attacked. Other
+researchers filed them afterwards. G12 asks the clause question but fires only after the decision to park;
+G16 makes "is this an attack on the entry?" an answer the sidecar must hold.
+
+**What it does not do.** It cannot check that `attacks_entry:` is answered truthfully: the ledger does not
+record a row's generator or target. Like G12, it makes the question unavoidable. **The Stop-hook
+backstop is silent on sidecars written before 2026-10-19** (they answer neither field), because firing
+on dozens of old rows would get it disabled (constraint 3 in `CLAUDE.md`).
+
+### G19 — a `MATCH` quotes the entry for every caller and impact the row claims (2026-10-26)
+
+**Rule.** A dedup sidecar written or changed with `result: MATCH` must hold a `claims:` list: one item per
+caller and per impact the row claims, each `caller:` or `impact:` with a `quote:` of the entry's words
+that state it, at least 20 characters, found exactly (whitespace-normalised) in a file listed in
+`searched:` that holds an entry copied verbatim: the programme's text, a prior audit's, or other researchers' filed issues under `00-triage/` (`G19_VERBATIM_SOURCE`). Our own ledger, triage notes, agent-written prior-audit keys, scope exclusions and README do not count. `quote: not stated`, a short quote, or a quote not found in a searched file is refused: the
+row is `PARTIAL`. `PARTIAL` and `NO-MATCH` need no list.
+
+**Origin.** Richard, 2026-10-26. The live sorter's prose rule says a row claiming a caller or impact the
+entry does not state is partial; one arm of a pre-registered grader experiment
+(`bench/PREREG-full-text-grader.md`) showed a model given that rule find the extra claim, quote it, and
+still answer "same". A wrong KNOWN is a real finding never tested (REF-2), so the decision moved into code.
+
+**What it does not do.** It cannot tell that the list holds every claim the row makes; the human sees each
+list at close-out (`cli.py known-review`, Phase 4). It judges the sidecar at the hook, so a sidecar written
+through Bash is not judged, and a KNOWN verdict the matcher returned with no sidecar written is invisible to it
+(Phase 3 ranks by the sidecar for that reason). Sidecars on disk before it shipped are not re-read unless edited; an edit judges the whole file. A placeholder silences it only in `result:`.
 
 ### G12 — a Known-Issue match retires the CLAIM, not the row (REF-2)
 
@@ -236,6 +278,9 @@ one row is promoted. It catches the case that actually cost us — building a ha
      one of the searched files after whitespace normalisation. Exact matching is the point: it is
      what a paraphrase or a digest cannot satisfy.
    - `unmatched:` — **required iff `PARTIAL`**, ≥40 chars: what was searched for and **not** found.
+   - `clause:` and `attacks_entry:` — **required for a new `MATCH` at `SCOPE-HELD`** (G16, REF-31): which part
+     of the entry the row's claim is about (`issue | accepted | mitigation | bound | fix`), and whether the row was
+     generated to attack this entry (`yes | no`). `tooling/known-issue-brief.py` returns both.
 
 #### `PARTIAL` — dedup has two kinds of MATCH (added 2026-08-25)
 
@@ -344,6 +389,38 @@ finding is not a section.
 **Deliberately out of scope: the hunter brief.** `skill/phases/phase-1-hunt.md` step 3 still briefs hunters from a digest.
 Requiring bodies there would gate row creation, which constraint 1 forbids; the obligation is charged
 where the spend is committed instead.
+
+## G17 — every function the entry names is searched on its own (engagement 22)
+
+**Rule.** On a new promotion that writes or cites a dedup sidecar with `result: NO-MATCH` or `PARTIAL`, the tool
+searches each function named in the row's `entry` field, by its bare name (`openPosition` for
+`IPool.openPosition`, whole word, case-sensitive), in the client's own documents: `00-triage/known-issues*`,
+`00-triage/filed-issues*` and the target README. It refuses while any hit is unanswered, and the refusal prints the
+matching lines. A hit is answered by a `name_hits_read:` entry `{name, file, note}`, the note saying why that line is
+not this bug. A `MATCH` is silent, because it has already found its source. Identifiers are read conservatively:
+backticked code-shaped tokens, `Contract.function` and `function(`. Role words, contract names, plain English and
+Solidity built-ins (`type`, `abi.encode`, `keccak256`, casts) are ignored.
+
+**Origin.** Engagement 22, 2026-10-20. A filed row's sidecar had searched the client README only with
+joined phrases and recorded `PARTIAL`, while a README line described exactly that design in prose. With
+synthetic names: the entry is `` `IPool.openPosition` by the pool owner, forwarded to
+`Registry.openPosition` ``; the sidecar searched "openPosition lockPeriod" and "owner-chosen lock"; the README
+says "calls the pool's `openPosition` ... passes the initial lock period explicitly". No phrase matched, the
+issue was filed, and that README line answered it. Searching `openPosition` alone would have hit it.
+
+**Why this form.** The first version checked that each bare name was on the sidecar's `terms:` list, which an agent
+can satisfy by adding the word without searching. Richard chose 2026-10-20 to have the tool run the search and show
+the lines. Searching prior-audit report bodies as well made it fire on about 83% of qualifying rows on disk; the
+known issues, filed issues and README alone give about 42% (279 of 667), and report bodies are already covered by
+G1's cross-check and G14's every-body search.
+
+**What it does not do.** It does not read prior-audit report bodies (G1 and G14 do). It is not dated: it charges any
+row that does not yet hold G1, so the row driver and the Stop-hook backstop do not call it, and State Locking means a
+row whose G1 was already discharged is not re-judged (the same mechanism as G14's every-body rule). An old UNTESTED
+row, or one that left by `SCOPE-HELD`, `BELOW-BAR` or `BLOCKED` without passing `TIER-1`, is charged when next
+promoted: 14 of the 279 rows on disk that would fail it. It does not derive
+terms from the hypothesis or the invariant, only from `entry`, which is where a ledger names the function under attack.
+
 ---
 
 ## G2 — Evidence-cited disposition (no prose-kills)
