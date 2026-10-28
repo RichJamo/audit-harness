@@ -1,0 +1,47 @@
+name: pr-review-line
+
+# Every PR body opens with one line saying whether and how the code was reviewed:
+#   **Review:** <reviewer>, <verdict>. <what it found; what was fixed or left>.
+#   **Review:** none, because <reason>.
+# A local hook refuses `gh pr create` without it, but it let #9 to #15 through (their bodies
+# came from a file it could not read; #15's line was also misspelled), and #10 put a HIGH bug
+# on main unreviewed. This check reads the body GitHub actually has, however the PR was opened.
+# It marks the PR failed; it blocks the merge only if main's ruleset requires it.
+#
+# To fix a failure, edit the body: the `edited` trigger re-runs the check on the new body.
+# "Re-run jobs" replays the old event and checks the old body again. The body reaches the
+# script only through an environment variable, never interpolated into it.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two quick edits: only the newest body's run reports.
+  group: pr-review-line-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-line:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Body opens with a review line
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          body = (os.environ.get("PR_BODY") or "").replace("\r", "")
+          first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+          prefix = "**Review:**"
+          summary = first[len(prefix):].strip()
+          if not first.startswith(prefix) or not summary or summary.startswith("<") or summary.upper().startswith("TODO"):
+              print(f"::error::The PR body's first line must be the review line, e.g. "
+                    f"'{prefix} code-reviewer, approve with nits. <what it found; what was fixed>.' "
+                    f"or '{prefix} none, because <reason>.' First line now: {first[:120]!r}")
+              sys.exit(1)
+          print(f"ok: {first[:200]}")
+          PY
