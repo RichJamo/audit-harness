@@ -1,2 +1,5 @@
 __pycache__/
 *.py[cod]
+
+# Local Claude Code state (agent memory, settings). Private working notes; never publish.
+.claude/
