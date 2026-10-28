@@ -578,6 +578,25 @@ class TestForgeEvidenceNamesTheTestFunction(Promoted):
             ("a static-analysis log, no function named", self.other("02-static/slither.txt"), 0),
         ]
 
+    def test_an_unfilled_scaffold_is_not_evidence(self):
+        """G15: a PoC scaffold declares its own test functions, so the declaration check passes on a
+        file nobody wrote. Every generated test body carries SCAFFOLD-UNFILLED until it is written or
+        deleted, and a cited file that still holds the mark is refused."""
+        scaffold = self.other("test/R6s.t.sol",
+                              "contract T { function test_R6() public { revert(); } // SCAFFOLD-UNFILLED\n}")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = self.run_cli("promote", "--id", "R-6", "--to", "REFUTED",
+                                "--evidence", f"{scaffold}::test_R6", "--reason", KILL_REASON)
+        self.assertEqual(2, code)
+        self.assertIn("SCAFFOLD-UNFILLED", err.getvalue())
+        self.assertEqual("TIER-1", replay(self.eng)["R-6"]["status"])
+        # The same file with the test written passes, so the mark, not the file, is what is refused.
+        (self.eng / scaffold).write_text("contract T { function test_R6() public { assertTrue(true); } }")
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, self.run_cli("promote", "--id", "R-6", "--to", "REFUTED",
+                                             "--evidence", f"{scaffold}::test_R6", "--reason", KILL_REASON))
+
     def test_the_function_is_required_for_forge_evidence_only(self):
         for status in ("REFUTED", "CONFIRMED"):
             for what, evidence, expected_exit in self.cases():
